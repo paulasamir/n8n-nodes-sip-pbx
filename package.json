@@ -1,0 +1,102 @@
+{
+  "name": "n8n-nodes-sip-pbx",
+  "version": "0.1.0",
+  "description": "SIP PBX community nodes for n8n with daemon-backed call control, playback, recording, bridging, and queue orchestration",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "sip",
+    "pbx",
+    "voip",
+    "ivr",
+    "queue",
+    "dtmf",
+    "recording",
+    "bridge",
+    "websocket",
+    "realtime",
+    "ai",
+    "siptg"
+  ],
+  "homepage": "https://github.com/siptg/n8n-nodes-sip-pbx#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/siptg/n8n-nodes-sip-pbx.git"
+  },
+  "bugs": {
+    "url": "https://github.com/siptg/n8n-nodes-sip-pbx/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "GPL-3.0-or-later",
+  "main": "index.js",
+  "scripts": {
+    "build": "npm run build:dist",
+    "build:dist": "node scripts/build-dist.js",
+    "build:dist:release": "node scripts/build-dist.js --release",
+    "build:release": "npm run build:dist:release",
+    "build:native": "node-gyp rebuild",
+    "build:prebuild:host": "npm run build:native && node scripts/write-prebuild.js --release=true",
+    "build:prebuild:host:debug": "npm run build:native && node scripts/write-prebuild.js --release=false",
+    "build:src": "node scripts/build-src.js",
+    "test": "npm run test:spec",
+    "test:unit": "npm run build:src && node --test $(find tests/unit -name '*.test.js' -print)",
+    "test:integration": "npm run build:src && node --test $(find tests/integration -name '*.test.js' -print)",
+    "test:spec": "npm run build:src && node --test $(find tests/unit tests/integration -name '*.test.js' -print)",
+    "ffaudio:profile": "node scripts/ffaudio-build-profile.js --json",
+    "ffaudio:build:vendor": "bash scripts/build-ffaudio-vendor.sh",
+    "ffaudio:build:prebuild:vendor": "bash scripts/build-ffaudio-prebuild-vendor.sh",
+    "ffaudio:build:linux-prebuilds": "bash scripts/build-ffaudio-linux-prebuilds.sh",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke:all": "npm run smoke:src && npm run smoke:nodes && npm run smoke:media && npm run smoke:runtime && npm run smoke:recording && npm run smoke:worker-reap && npm run smoke:autoshutdown && npm run smoke:autostart",
+    "smoke:src": "npm run build:src && node tests/smoke/source-build.smoke.js",
+    "smoke:media": "npm run build:dist && node tests/smoke/media.smoke.js",
+    "smoke:runtime": "npm run build:dist && node tests/smoke/runtime-media.smoke.js",
+    "smoke:bridge-migration": "npm run build:dist && node tests/smoke/bridge-migration.smoke.js",
+    "smoke:http-repro": "npm run build:dist && node tests/smoke/http-repro.smoke.js",
+    "smoke:recording": "npm run build:dist && node tests/smoke/recording.smoke.js",
+    "smoke:worker-reap": "npm run build:dist && node tests/smoke/worker-reap.smoke.js",
+    "smoke:autoshutdown": "npm run build:dist && node tests/smoke/autoshutdown.smoke.js",
+    "smoke:nodes": "npm run build:dist && node tests/smoke/nodes.smoke.js",
+    "smoke:autostart": "npm run build:dist && node tests/smoke/autostart.smoke.js",
+    "install": "node scripts/install-native.js",
+    "prepack": "npm run build:dist:release"
+  },
+  "files": [
+    "dist",
+    "index.js",
+    "README.md",
+    "LICENSE",
+    "bin",
+    "prebuilds",
+    "scripts/install-native.js"
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/n8n/credentials/SipPbxExternal.credentials.js"
+    ],
+    "nodes": [
+      "dist/n8n/nodes/SipPbx.node.js",
+      "dist/n8n/nodes/SipPbxTrigger.node.js"
+    ]
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.7.0",
+    "node-gyp-build": "^4.8.4",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "node-gyp": "^12.2.0",
+    "terser": "^5.46.2",
+    "typescript": "^5.0.0"
+  },
+  "bin": {
+    "sip-pbx-daemon": "bin/sip-pbx-daemon.js"
+  }
+}

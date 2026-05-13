@@ -1,0 +1,1 @@
+module.exports={SipPbx:require("./dist/n8n/nodes/SipPbx.node.js").SipPbx,SipPbxTrigger:require("./dist/n8n/nodes/SipPbxTrigger.node.js").SipPbxTrigger,SipPbxExternal:require("./dist/n8n/credentials/SipPbxExternal.credentials.js").SipPbxExternal};

@@ -1,0 +1,12 @@
+.DS_Store
+.npmrc
+.vscode/
+.claude/
+AGENTS.md
+build/
+build-src/
+build-ffaudio/
+dist/
+node_modules/
+n8n-nodes-sip-pbx-*.tgz
+.smoke-*/

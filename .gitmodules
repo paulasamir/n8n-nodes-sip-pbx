@@ -1,0 +1,15 @@
+[submodule "vendor/bcg729"]
+	path = vendor/bcg729
+	url = https://github.com/BelledonneCommunications/bcg729
+[submodule "vendor/ffmpeg"]
+	path = vendor/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
+[submodule "vendor/lame"]
+	path = vendor/lame
+	url = https://github.com/lameproject/lame.git
+[submodule "vendor/libg722"]
+	path = vendor/libg722
+	url = https://github.com/sippy/libg722.git
+[submodule "vendor/libopus"]
+	path = vendor/libopus
+	url = https://github.com/xiph/opus.git
