@@ -76,7 +76,7 @@ import { QueueEntryRegistry } from "./queue/queue-entry-registry";
 import { QueueService } from "./queue/queue-service";
 import { QueueTriggerPublisherService } from "./queue/queue-trigger-publisher";
 import { InboundCallService } from "./signaling/calls/inbound-call-service";
-import { ExtensionAuthBridge } from "./signaling/extensions/extension-auth-bridge";
+import { TriggerAuthBridge } from "./signaling/extensions/extension-auth-bridge";
 import { ExtensionBindingRegistry } from "./signaling/extensions/extension-binding-registry";
 import { ExtensionHost } from "./signaling/extensions/extension-host";
 import { SignalingService } from "./signaling/signaling-service";
@@ -299,10 +299,9 @@ export class SipPbxDaemon {
     this.socketPath = socketPath || getSocketPath();
     this.authService = new InteractiveAuthService(
       new InteractiveAuthRequestRegistry(),
-      new InteractiveAuthTriggerPublisher((ref, branch, payload) => {
-        this.publishTriggerStream("extensions", ref, branch, payload);
+      new InteractiveAuthTriggerPublisher((kind, ref, branch, payload) => {
+        this.publishTriggerStream(kind, ref, branch, payload);
       }),
-      (ref) => this.readExtensionsAuthTimeoutMs(ref),
     );
     const inboundCallService = new InboundCallService(this.legService, async (input) => {
       await this.maybePublishRecordRequest(input);
@@ -311,9 +310,11 @@ export class SipPbxDaemon {
       registry: new ExtensionBindingRegistry(),
       legService: this.legService,
       inboundCallService,
-      authBridge: new ExtensionAuthBridge({
+      authBridge: new TriggerAuthBridge({
         authService: this.authService,
+        triggerKind: "extensions",
         resolveActiveTriggerKey: (ref) => this.getActiveTriggerKey("extensions", ref),
+        resolveDefaultTimeoutMs: (ref) => this.readExtensionsAuthTimeoutMs(ref),
       }),
       publish: (ref, branch, payload) => {
         this.publishTriggerStream("extensions", ref, branch, payload);
@@ -369,6 +370,12 @@ export class SipPbxDaemon {
       extensionService: this.extensionService,
       trunkService: this.trunkService,
       authService: this.authService,
+      trunkAuthBridge: new TriggerAuthBridge({
+        authService: this.authService,
+        triggerKind: "trunk",
+        resolveActiveTriggerKey: (ref) => this.getActiveTriggerKey("trunk", ref),
+        resolveDefaultTimeoutMs: (ref) => this.readTrunkAuthTimeoutMs(ref),
+      }),
       ensureMediaTransportEndpoint: (legId) => this.mediaService.ensureTransportEndpoint(legId),
       legCoordinator: this.legCoordinator,
       onAttemptRinging: (legId) => {
@@ -610,6 +617,15 @@ export class SipPbxDaemon {
     return timeoutMs > 0 ? timeoutMs : null;
   }
 
+  private readTrunkAuthTimeoutMs(ref: string): number | null {
+    const config = this.getTriggerConfig("trunk", ref);
+    if (!config) {
+      return null;
+    }
+    const timeoutMs = Math.max(0, Math.round(Number(config.authTimeoutSeconds || OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds) * 1000));
+    return timeoutMs > 0 ? timeoutMs : null;
+  }
+
   private readRecordResponseTimeoutMs(kind: "trunk" | "extensions", ref: string): number | null {
     const config = this.getTriggerConfig(kind, ref);
     if (!config) {
@@ -749,24 +765,25 @@ export class SipPbxDaemon {
       "call.hangup": ["operation", "legId"],
       "call.bridge": ["operation", "legAId", "legBId", "emitDtmfEvents", "relayDtmf"],
       "call.unbridge": ["operation", "legId"],
-      "call.controlRecording": ["operation", "legId", "recordingControlAction"],
-      "call.waitCallEvent": ["operation", "legId", "legIds", "timeoutSeconds", "interdigitTimeoutSeconds", "rules", "waitDtmfFallbackEnabled", "waitDtmfMultiDigitFallbackEnabled", "dtmfTerminatorDigit"],
-      "ai.attachVoiceAgent": ["operation", "legId"],
+      "call.wait": ["operation", "legId", "legIds", "timeoutSeconds", "interdigitTimeoutSeconds", "rules", "waitDtmfFallbackEnabled", "waitDtmfMultiDigitFallbackEnabled", "dtmfTerminatorDigit"],
       "dial.make": ["operation", "callMode", "ref", "publicRef", "destination", "extensionNumbers", "extensionListOnlyFreeEndpoints", "workflowScopeKey", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "transportProfile", "websocketStartMode", "openaiApiKey", "openaiRealtimeModel", "openaiRealtimeVoice", "openaiRealtimeInputTranscriptionModel", "openaiRealtimeInstructions", "openaiRealtimePromptId", "openaiRealtimePromptVersion", "openaiRealtimePromptVariablesJson", "geminiApiKey", "geminiLiveModel", "geminiLiveVoice", "geminiLiveApiVersion", "geminiLiveInstructions", "websocketUrl", "websocketHeadersJson", "websocketInitialMessagesJson", "websocketAudioInputEventType", "websocketAudioInputField", "websocketAudioInputSampleRate", "websocketAudioOutputEventTypes", "websocketAudioOutputField", "websocketAudioOutputSampleRate", "sipCredentials"],
       "dial.break": ["operation", "dialId", "dialBreakReason"],
-      "dial.waitDialEvent": ["operation", "dialId", "dialIds", "dialTimeoutSeconds", "waitEventOutputs"],
+      "dial.wait": ["operation", "dialId", "dialIds", "dialTimeoutSeconds", "waitEventOutputs"],
       "media.playAudio": ["operation", "mediaLegId", "sourceType", "binaryProperty", "binaryDataBase64", "filePath", "playbackHttpUrl", "playbackHttpMethod", "playbackHttpHeaders", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
       "media.playTone": ["operation", "mediaLegId", "tone", "customTone", "repeatInfinite", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
       "media.recordAudio": ["operation", "mediaLegId", "interruptOnDtmf", "interruptOnSilence", "silenceThreshold", "silenceDurationMs", "maxDurationSeconds", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordOutputType", "recordBinaryProperty", "recordFilePath", "recordHttpUrl", "recordHttpMethod", "recordHttpHeaders", "mediaExecutionMode", "stopOtherMedia"],
       "media.stopMedia": ["operation", "stopMediaTarget", "stopMediaId", "stopMediaLegId", "stopMediaReason"],
-      "media.waitMedia": ["operation", "waitMediaIds", "waitMediaTimeoutSeconds"],
+      "media.wait": ["operation", "waitMediaIds", "waitMediaTimeoutSeconds"],
       "media.sendDtmf": ["operation", "mediaLegId", "dtmfDigits", "dtmfMethod", "dtmfDurationMs", "dtmfGapMs"],
-      "respond.respondToRecord": ["operation", "recordRequestId", "active", "recordFilePath", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordSplitChannels", "waitForRecordingCompletion"],
-      "respond.respondToAuth": ["operation", "authRequestId", "authAction", "password", "extension", "statusCode", "reason"],
-      "queue.enqueueLeg": ["operation", "legId", "ref", "queuePlacement", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "extensionListOnlyFreeEndpoints", "rejoinExisting", "retryAttempts", "retryPauseSeconds"],
-      "queue.setQueueCallback": ["operation", "legId", "callbackEnabled"],
-      "respond.respondToAiTool": ["operation", "aiToolRequestId", "outputText"],
-      "queue.getQueueStats": ["operation", "queueStatsTarget", "ref", "legId"],
+      "queue.putLeg": ["operation", "legId", "ref", "queuePlacement", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "extensionListOnlyFreeEndpoints", "rejoinExisting", "retryAttempts", "retryPauseSeconds"],
+      "queue.setCallback": ["operation", "legId", "callbackEnabled"],
+      "queue.getStats": ["operation", "queueStatsTarget", "ref", "legId"],
+      "recording.control": ["operation", "legId", "recordingControlAction"],
+      "recording.start": ["operation", "legId", "recordFilePath", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordSplitChannels", "waitForRecordingCompletion"],
+      "ai.attachVoiceAgent": ["operation", "legId"],
+      "respond.toRecord": ["operation", "recordRequestId", "active", "recordFilePath", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordSplitChannels", "waitForRecordingCompletion"],
+      "respond.toAuth": ["operation", "authRequestId", "authAction", "password", "extension", "statusCode", "reason"],
+      "respond.toAiTool": ["operation", "aiToolRequestId", "outputText"],
     };
     const fields = fieldsByOperation[operation] || null;
     return fields ? new Set(fields) : null;
@@ -783,7 +800,7 @@ export class SipPbxDaemon {
     if (operation === "ai.attachVoiceAgent") {
       return ActionResultBranch;
     }
-    if (operation === "call.waitCallEvent") {
+    if (operation === "call.wait") {
       const output = readResultString(result, "output");
       if (output === CALL_WAIT_OUTPUT_MATCHED) return readResultString(result, "matchedLabel") || CallWaitBranchTimeout;
       if (output === CALL_WAIT_OUTPUT_DTMF_FALLBACK) return CallWaitBranchDtmfFallback;
@@ -791,7 +808,7 @@ export class SipPbxDaemon {
       if (output === CALL_WAIT_OUTPUT_ENDED) return CallWaitBranchEnded;
       return CallWaitBranchTimeout;
     }
-    if (operation === "dial.waitDialEvent") {
+    if (operation === "dial.wait") {
       const eventType = readResultEventType(result);
       if (eventType === DIAL_EVENT_RINGING) return DialWaitBranchRinging;
       if (eventType === DIAL_EVENT_PROGRESS) return DialWaitBranchProgress;
@@ -800,7 +817,7 @@ export class SipPbxDaemon {
       if (eventType === DIAL_EVENT_TIMEOUT) return DialWaitBranchTimeout;
       return DialWaitBranchFailed;
     }
-    if (operation === "media.waitMedia") {
+    if (operation === "media.wait") {
       const eventType = readResultEventType(result);
       if (eventType === MEDIA_EVENT_INTERRUPTED) return WaitMediaBranchInterrupted;
       if (eventType === MEDIA_EVENT_COMPLETED || eventType === MEDIA_EVENT_FAILED) return WaitMediaBranchCompleted;
@@ -886,7 +903,7 @@ export class SipPbxDaemon {
           retention.release();
         }
       }
-      case "call.waitCallEvent":
+      case "call.wait":
       {
         const legIds = Array.isArray(action.legIds)
           ? Array.from(new Set(normalizeStringList(action.legIds)))
@@ -895,7 +912,7 @@ export class SipPbxDaemon {
           action.timeoutSeconds == null || action.timeoutSeconds === ""
             ? OPTION_DEFAULTS.call.waitTimeoutSeconds
             : action.timeoutSeconds;
-        const retention = this.legService.retainLegs(legIds, "action:call.waitCallEvent");
+        const retention = this.legService.retainLegs(legIds, "action:call.wait");
         try {
           return await this.legWaitService.waitForEvent(
             legIds.length > 1 ? legIds : (legIds[0] || ""),
@@ -913,12 +930,12 @@ export class SipPbxDaemon {
           retention.release();
         }
       }
-      case "dial.waitDialEvent":
+      case "dial.wait":
       {
         const dialIds = Array.isArray(action.dialIds)
           ? normalizeStringList(action.dialIds)
           : normalizeStringList(action.dialId);
-        const retentions = dialIds.map((dialId) => this.dialService.retainDial(dialId, "action:dial.waitDialEvent"));
+        const retentions = dialIds.map((dialId) => this.dialService.retainDial(dialId, "action:dial.wait"));
         try {
           return await this.dialWaitService.waitForEvent(dialIds.length > 1 ? dialIds : (dialIds[0] || ""), {
             timeoutMs: Math.max(0, Math.round(Number(action.dialTimeoutSeconds || OPTION_DEFAULTS.dial.waitTimeoutSeconds) * 1000)),
@@ -930,15 +947,40 @@ export class SipPbxDaemon {
           }
         }
       }
-      case "call.controlRecording":
+      case "recording.control":
       {
         const legId = String(action.legId || "");
-        const retention = this.legService.retainLeg(legId, "action:call.controlRecording");
+        const retention = this.legService.retainLeg(legId, "action:recording.control");
         try {
           return await this.mediaService.controlRecording(
             legId,
             String(action.recordingControlAction || OPTION_DEFAULTS.call.recordingControlAction) as "pause" | "resume",
           );
+        } finally {
+          retention.release();
+        }
+      }
+      case "recording.start":
+      {
+        const legId = String(action.legId || "");
+        const retention = this.legService.retainLeg(legId, "action:recording.start");
+        try {
+          const waitForRecordingCompletion = Boolean(action.waitForRecordingCompletion);
+          const recordFilePath = String(action.recordFilePath || "").trim();
+          const recordInput = this.buildGlobalRecordingStartInput(action);
+          await this.mediaService.restartGlobalCallRecording(legId, recordInput);
+          if (waitForRecordingCompletion) {
+            const finalResult = await this.mediaService.waitForGlobalCallRecording(legId, context);
+            return {
+              legId,
+              filePath: recordFilePath,
+              ...(finalResult || {}),
+            };
+          }
+          return {
+            legId,
+            filePath: recordFilePath,
+          };
         } finally {
           retention.release();
         }
@@ -963,7 +1005,7 @@ export class SipPbxDaemon {
           retention.release();
         }
       }
-      case "respond.respondToRecord":
+      case "respond.toRecord":
       {
         const recordRequest = this.consumeRecordRequest(String(action.recordRequestId || ""));
         const active = action.active !== false;
@@ -975,24 +1017,7 @@ export class SipPbxDaemon {
           };
         }
         const recordFilePath = String(action.recordFilePath || "").trim();
-        if (!recordFilePath) {
-          throw daemonError("invalid_request", "recordFilePath is required when global recording is active");
-        }
-        const recordFileFormat = String(action.recordFileFormat || OPTION_DEFAULTS.recordAudio.fileFormat).trim().toLowerCase() || OPTION_DEFAULTS.recordAudio.fileFormat;
-        const recordInput: Record<string, unknown> = {
-          mediaExecutionMode: "background",
-          recordOutputType: "file",
-          recordFilePath,
-          recordFileFormat,
-          recordSplitChannels: Boolean(action.recordSplitChannels ?? OPTION_DEFAULTS.autoRecording.splitChannels),
-        };
-        if (recordFileFormat === "wav") {
-          recordInput.recordWavSampleRate = Number(action.recordWavSampleRate || OPTION_DEFAULTS.recordAudio.wavSampleRate);
-          recordInput.recordWavBitDepth = Number(action.recordWavBitDepth || OPTION_DEFAULTS.recordAudio.wavBitDepth);
-        } else {
-          recordInput.recordCompressedSampleRate = Number(action.recordCompressedSampleRate || OPTION_DEFAULTS.recordAudio.compressedSampleRate);
-          recordInput.recordCompressedBitrate = Number(action.recordCompressedBitrate || OPTION_DEFAULTS.recordAudio.compressedBitrateKbps);
-        }
+        const recordInput = this.buildGlobalRecordingStartInput(action);
         await this.mediaService.startGlobalCallRecording(recordRequest.legId, recordInput);
         if (waitForRecordingCompletion) {
           const finalResult = await this.mediaService.waitForGlobalCallRecording(recordRequest.legId, context);
@@ -1011,7 +1036,7 @@ export class SipPbxDaemon {
           filePath: recordFilePath,
         };
       }
-      case "respond.respondToAuth":
+      case "respond.toAuth":
         return this.authService.resolveRequest(String(action.authRequestId || ""), {
           action: normalizeAuthAction(action.authAction),
           password: String(action.password || ""),
@@ -1019,7 +1044,7 @@ export class SipPbxDaemon {
           statusCode: action.statusCode == null ? undefined : Number(action.statusCode),
           reason: String(action.reason || ""),
         });
-      case "queue.enqueueLeg":
+      case "queue.putLeg":
         return this.queueService.enqueueLeg(
           String(action.ref || ""),
           String(action.legId || ""),
@@ -1043,15 +1068,15 @@ export class SipPbxDaemon {
               : Math.max(0, Math.round(Number(action.retryPauseSeconds) * 1000)),
           },
         );
-      case "queue.setQueueCallback":
+      case "queue.setCallback":
         return this.queueService.setQueueCallback(String(action.legId || ""), action.callbackEnabled !== false);
-      case "respond.respondToAiTool":
+      case "respond.toAiTool":
       {
         const aiToolRequestId = String(action.aiToolRequestId || "");
         const outputText = String(action.outputText || "");
         return this.respondToAiTool(aiToolRequestId, outputText);
       }
-      case "queue.getQueueStats":
+      case "queue.getStats":
         return this.queueService.getQueueStats({
           ref: String(action.queueStatsTarget || OPTION_DEFAULTS.queueAction.statsTarget) === OPTION_DEFAULTS.queueAction.statsTarget ? String(action.ref || "") : undefined,
           legId: String(action.queueStatsTarget || OPTION_DEFAULTS.queueAction.statsTarget) === "legId" ? String(action.legId || "") : undefined,
@@ -1069,7 +1094,7 @@ export class SipPbxDaemon {
           stopMediaLegId: String(action.stopMediaLegId || action.legId || ""),
           stopMediaReason: String(action.stopMediaReason || OPTION_DEFAULTS.stopMedia.reason),
         }, context);
-      case "media.waitMedia":
+      case "media.wait":
         return this.mediaService.waitMedia({
           waitMediaIds: Array.isArray(action.waitMediaIds) ? action.waitMediaIds.map((value) => String(value || "")) : [],
           waitMediaTimeoutMs: Math.max(0, Math.round(Number(action.waitMediaTimeoutSeconds || OPTION_DEFAULTS.waitMedia.timeoutSeconds) * 1000)),
@@ -1714,6 +1739,29 @@ export class SipPbxDaemon {
       throw daemonError("invalid_record_request", `Unknown record request ${recordRequestId}`);
     }
     return request;
+  }
+
+  private buildGlobalRecordingStartInput(action: Record<string, unknown>): Record<string, unknown> {
+    const recordFilePath = String(action.recordFilePath || "").trim();
+    if (!recordFilePath) {
+      throw daemonError("invalid_request", "recordFilePath is required when global recording is active");
+    }
+    const recordFileFormat = String(action.recordFileFormat || OPTION_DEFAULTS.recordAudio.fileFormat).trim().toLowerCase() || OPTION_DEFAULTS.recordAudio.fileFormat;
+    const recordInput: Record<string, unknown> = {
+      mediaExecutionMode: "background",
+      recordOutputType: "file",
+      recordFilePath,
+      recordFileFormat,
+      recordSplitChannels: Boolean(action.recordSplitChannels ?? OPTION_DEFAULTS.autoRecording.splitChannels),
+    };
+    if (recordFileFormat === "wav") {
+      recordInput.recordWavSampleRate = Number(action.recordWavSampleRate || OPTION_DEFAULTS.recordAudio.wavSampleRate);
+      recordInput.recordWavBitDepth = Number(action.recordWavBitDepth || OPTION_DEFAULTS.recordAudio.wavBitDepth);
+    } else {
+      recordInput.recordCompressedSampleRate = Number(action.recordCompressedSampleRate || OPTION_DEFAULTS.recordAudio.compressedSampleRate);
+      recordInput.recordCompressedBitrate = Number(action.recordCompressedBitrate || OPTION_DEFAULTS.recordAudio.compressedBitrateKbps);
+    }
+    return recordInput;
   }
 
   private clearRecordRequestsForLeg(legId: string): void {

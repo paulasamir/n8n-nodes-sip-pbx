@@ -4,6 +4,7 @@ import {
   buildEmptyOutputs,
   buildTrunkTriggerBranchOrder,
   requireBranchIndex,
+  TrunkTriggerBranchAuth,
   TrunkTriggerBranchCall,
   TrunkTriggerBranchRecord,
   type TrunkTriggerBranch,
@@ -11,23 +12,29 @@ import {
 import { readCredentialsParameter } from "../shared/credential-loading";
 import { readCollectionOptions, readHeaderLinesFromCollectionOptions, readStringParameter } from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem, normalizePublicRawObject } from "../shared/output-builders";
+import { extractSipDisplayName, extractSipUser } from "../shared/sip-address";
 
-function extractSipUser(value: unknown): string {
-  const raw = String(value || "").trim();
-  if (!raw) {
-    return "";
+function optionalNumber(value: unknown, fallback: number): number {
+  if (value == null || value === "") {
+    return fallback;
   }
-  const uriMatch = raw.match(/<([^>]+)>/);
-  const uri = String(uriMatch ? uriMatch[1] : raw).trim();
-  const sipMatch = uri.match(/^sips?:([^@;>]+)/i);
-  if (sipMatch) {
-    return decodeURIComponent(String(sipMatch[1] || "").trim());
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
+}
+
+function pickFirst(...sources: unknown[]): unknown {
+  for (const value of sources) {
+    if (value != null && value !== "") {
+      return value;
+    }
   }
-  const atIndex = uri.indexOf("@");
-  if (atIndex > 0) {
-    return uri.slice(0, atIndex).trim();
-  }
-  return uri;
+  return undefined;
+}
+
+function normalizeTrunkRegisterModeValue(value: unknown): "register" | "auth" {
+  return String(value || OPTION_DEFAULTS.trigger.trunk.registerMode).trim().toLowerCase() === "auth"
+    ? "auth"
+    : "register";
 }
 
 export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Promise<any> {
@@ -35,33 +42,40 @@ export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Prom
   if (!ref) {
     throw new Error("Trigger ref is required");
   }
-  const sipCredentials = await readCredentialsParameter(node, "sipPbxExternal", 0);
-  const registerOnStart = Boolean(node.getNodeParameter?.("registerOnStart", 0, OPTION_DEFAULTS.trigger.trunk.registerOnStart));
+  const trunkRegisterMode = normalizeTrunkRegisterModeValue(
+    node.getNodeParameter?.("trunkRegisterMode", 0, OPTION_DEFAULTS.trigger.trunk.registerMode),
+  );
+  const registerMode = trunkRegisterMode === "register";
   const enableCallRecording = Boolean(node.getNodeParameter?.("enableCallRecording", 0, OPTION_DEFAULTS.trigger.trunk.enableCallRecording));
   const options = readCollectionOptions(node, "trunkOptions", 0);
+  const sipCredentials = registerMode
+    ? await readCredentialsParameter(node, "sipPbxExternal", 0)
+    : null;
+  const credentials = sipCredentials || {};
+  const hasAuthBranch = !registerMode;
   const config: Record<string, unknown> = {
     ref,
-    sipCredentials,
-    registerOnStart,
+    trunkRegisterMode,
     enableCallRecording,
+    transport: String(pickFirst(options.transport, credentials.transport) || OPTION_DEFAULTS.sip.transport),
+    localBindIp: String(pickFirst(options.localBindIp, credentials.localBindIp) || "").trim(),
+    localBindPort: Number(pickFirst(options.localBindPort, credentials.localBindPort) || 0) || 0,
+    tlsBindPort: optionalNumber(pickFirst(options.tlsBindPort), OPTION_DEFAULTS.sip.tlsPort),
+    advertisedIp: String(pickFirst(options.advertisedIp, credentials.publicDomain) || "").trim(),
   };
-  if (registerOnStart) {
-    const rawRegistrationExpires = options.registrationExpires;
-    const numericRegistrationExpires = Number(rawRegistrationExpires);
-    config.registrationExpires = Number.isFinite(numericRegistrationExpires)
-      ? numericRegistrationExpires
-      : OPTION_DEFAULTS.sip.registrationExpiresSeconds;
+  if (sipCredentials) {
+    config.sipCredentials = sipCredentials;
+  }
+  if (registerMode) {
+    config.registrationExpires = optionalNumber(options.registrationExpires, OPTION_DEFAULTS.sip.registrationExpiresSeconds);
     config.registerHeaders = readHeaderLinesFromCollectionOptions(options, "registerHeaders");
+  } else {
+    config.realm = String(options.realm || "").trim();
+    config.authTimeoutSeconds = optionalNumber(options.authTimeoutSeconds, OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds);
+    config.continueTraversalOnAuthReject = options.continueTraversalOnAuthReject === true;
   }
   if (enableCallRecording) {
-    config.recordResponseTimeoutSeconds = (() => {
-      const raw = options.recordResponseTimeoutSeconds;
-      if (raw == null || raw === "") {
-        return OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds;
-      }
-      const numeric = Number(raw);
-      return Number.isFinite(numeric) ? numeric : OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds;
-    })();
+    config.recordResponseTimeoutSeconds = optionalNumber(options.recordResponseTimeoutSeconds, OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds);
   }
   await runtime.openTrunkTrigger(
     config,
@@ -69,12 +83,39 @@ export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Prom
       if (typeof node?.emit !== "function") {
         return;
       }
-      const branchOrder = buildTrunkTriggerBranchOrder(enableCallRecording);
+      const branchOrder = buildTrunkTriggerBranchOrder(enableCallRecording, hasAuthBranch);
       const branchName = branch as TrunkTriggerBranch;
       if (!(branchOrder as readonly string[]).includes(branchName)) {
         return;
       }
       const outputs = buildEmptyOutputs(branchOrder);
+      if (branchName === TrunkTriggerBranchAuth && hasAuthBranch) {
+        const authRequestId = String(payload.authRequestId || "");
+        const auth = payload.auth && typeof payload.auth === "object"
+          ? payload.auth as Record<string, unknown>
+          : {};
+        const item = buildTriggerItem({
+          authRequestId,
+          ref: String(payload.ref || ""),
+          requestType: String(payload.requestType || ""),
+          auth: Object.fromEntries(Object.entries(auth).map(([name, value]) => [name, String(value ?? "")])),
+          remoteIp: String(payload.remoteIp || ""),
+          remotePort: Number(payload.remotePort || 0),
+          transport: String(payload.transport || ""),
+          localIp: String(payload.localIp || ""),
+          localPort: Number(payload.localPort || 0),
+          raw: normalizePublicRawObject(payload.raw && typeof payload.raw === "object" ? payload.raw : {}),
+        }, {
+          ref: String(payload.ref || ""),
+          authRequestId: authRequestId || undefined,
+        });
+        if (authRequestId) {
+          attachResponseHandle(item, "auth", authRequestId);
+        }
+        outputs[requireBranchIndex(branchOrder, TrunkTriggerBranchAuth)].push(item);
+        node.emit(outputs);
+        return;
+      }
       if (branchName === TrunkTriggerBranchRecord) {
         outputs[requireBranchIndex(branchOrder, TrunkTriggerBranchRecord)].push(buildTriggerItem({
           eventType: String(payload.eventType || "record"),
@@ -88,7 +129,8 @@ export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Prom
           callerNumber: extractSipUser(payload.from),
           callerName: String(payload.callerName || ""),
           to: String(payload.to || ""),
-          called: extractSipUser(payload.to),
+          calledNumber: extractSipUser(payload.to),
+          calledName: extractSipDisplayName(payload.to),
           extension: String(payload.extension || ""),
         }, {
           ref: String(payload.ref || ""),
@@ -113,7 +155,8 @@ export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Prom
         callerNumber: extractSipUser(payload.from),
         callerName: String(payload.callerName || ""),
         to: String(payload.to || ""),
-        called: extractSipUser(payload.to),
+        calledNumber: extractSipUser(payload.to),
+        calledName: extractSipDisplayName(payload.to),
         raw: normalizePublicRawObject({
           callId: String(payload.callId || ""),
           from: String(payload.from || ""),

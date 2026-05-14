@@ -11,6 +11,14 @@ export type QueueDispatchPayload = {
   trunkRef: string;
 };
 
+export type QueueSharedPayload = {
+  mode?: "live" | "callback";
+  legId?: string;
+  callerNumber: string;
+  callerName: string;
+  trunkRef: string;
+};
+
 export class QueueTriggerPublisherService {
   private readonly publish: QueueTriggerPublisher;
 
@@ -18,10 +26,13 @@ export class QueueTriggerPublisherService {
     this.publish = publish;
   }
 
-  publishPlaced(ref: string, publicRef: string, legId: string): void {
+  publishPlaced(ref: string, publicRef: string, input: QueueSharedPayload & { legId: string }): void {
     this.publish(ref, "Placed", {
       ref: publicRef,
-      legId,
+      legId: input.legId,
+      callerNumber: input.callerNumber,
+      callerName: input.callerName,
+      trunkRef: input.trunkRef,
     });
   }
 
@@ -37,11 +48,14 @@ export class QueueTriggerPublisherService {
     });
   }
 
-  publishOffline(ref: string, publicRef: string, input: { mode: "live" | "callback"; legId?: string }): void {
+  publishOffline(ref: string, publicRef: string, input: QueueSharedPayload): void {
     this.publish(ref, "Offline", {
       ref: publicRef,
       mode: input.mode,
       ...(input.legId ? { legId: input.legId } : {}),
+      callerNumber: input.callerNumber,
+      callerName: input.callerName,
+      trunkRef: input.trunkRef,
     });
   }
 }

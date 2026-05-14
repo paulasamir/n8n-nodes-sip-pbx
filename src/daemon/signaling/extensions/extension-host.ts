@@ -3,7 +3,7 @@ import { LegService } from "../../legs/leg-service";
 import { InboundCallService } from "../calls/inbound-call-service";
 import type { InboundSipInvite } from "../types";
 import { deriveFlowScopedTriggerRef, parseFlowScopedTriggerRef } from "../triggers/ref-policy";
-import { ExtensionAuthBridge } from "./extension-auth-bridge";
+import { TriggerAuthBridge } from "./extension-auth-bridge";
 import { deriveExtensionEndpointId, ExtensionBindingRegistry } from "./extension-binding-registry";
 import { ExtensionRegistrationGrace } from "./extension-registration-grace";
 
@@ -13,7 +13,7 @@ export class ExtensionHost {
   private readonly registry: ExtensionBindingRegistry;
   private readonly legService: LegService;
   private readonly inboundCallService: InboundCallService;
-  private readonly authBridge: ExtensionAuthBridge;
+  private readonly authBridge: TriggerAuthBridge;
   private readonly publish: ExtensionTriggerPublisher;
   private readonly onAvailabilityChanged: (ref: string) => void;
   private readonly registrationGrace: ExtensionRegistrationGrace;
@@ -22,7 +22,7 @@ export class ExtensionHost {
     registry: ExtensionBindingRegistry;
     legService: LegService;
     inboundCallService: InboundCallService;
-    authBridge: ExtensionAuthBridge;
+    authBridge: TriggerAuthBridge;
     publish: ExtensionTriggerPublisher;
     onAvailabilityChanged?: (ref: string) => void;
     registrationGraceMs?: number;

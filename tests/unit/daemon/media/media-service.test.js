@@ -1051,6 +1051,85 @@ test("MediaService.waitForGlobalCallRecording cancellation does not stop active 
   await service.controlRecording(leg.legId, "pause");
 });
 
+test("MediaService.restartGlobalCallRecording finalizes the active recording before starting a new one", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+
+  const legRegistry = new MapRegistry();
+  const legService = new LegService(legRegistry);
+  const registry = new MapRegistry();
+  const service = new MediaService(registry, legService);
+  const leg = legService.createLeg({
+    legId: "leg-global-record-restart",
+    direction: "inbound",
+    transportType: "sip",
+  });
+
+  let activateCalls = 0;
+  let deactivateCalls = 0;
+  let finalizeCalls = 0;
+
+  service.executionPlane = {
+    registerPlayback: async () => {
+      throw new Error("unused");
+    },
+    unregisterPlayback: async () => null,
+    activateGlobalRecording: async (legId, mediaId) => {
+      activateCalls += 1;
+      return {
+        legId,
+        playbackCount: 0,
+        recordingActive: true,
+        activePlaybackMediaIds: [],
+        activeRecordingMediaId: mediaId,
+        playbackMix: [],
+      };
+    },
+    startRecording: async () => {
+      throw new Error("unused");
+    },
+    deactivateGlobalRecording: async () => {
+      deactivateCalls += 1;
+      return null;
+    },
+    stopRecording: async () => null,
+    finalizeRecording: async (_legId, _mediaId, result) => {
+      finalizeCalls += 1;
+      return { ...(result || {}) };
+    },
+    pauseGlobalRecording: async () => undefined,
+    resumeGlobalRecording: async () => undefined,
+    getRecordingMediaId: () => null,
+    sendDtmf: async () => false,
+    ensureTransportEndpoint: async () => ({}),
+    activateBridge: async () => undefined,
+    deactivateBridge: async () => undefined,
+    beginBridgeTermination: () => null,
+    orphanBridgeAfterLegEnd: async () => undefined,
+    pruneLegIfIdle: async () => undefined,
+    waitUntilLegStable: async () => undefined,
+    removeLeg: async () => undefined,
+    getSnapshot: () => null,
+    getBridgePeerInfo: () => null,
+    getWorkerCount: () => 0,
+    shutdown: async () => undefined,
+  };
+
+  await service.startGlobalCallRecording(leg.legId, {
+    recordFilePath: "/tmp/global-recording-1.wav",
+    recordFileFormat: "wav",
+  });
+  await service.restartGlobalCallRecording(leg.legId, {
+    recordFilePath: "/tmp/global-recording-2.wav",
+    recordFileFormat: "wav",
+  });
+
+  assert.strictEqual(activateCalls, 2);
+  assert.strictEqual(deactivateCalls, 1);
+  assert.strictEqual(finalizeCalls, 1);
+});
+
 test("MediaService.recordAudio does not reject when global call recording is active on the same leg", async () => {
   const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
   const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");

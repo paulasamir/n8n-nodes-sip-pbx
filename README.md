@@ -1,8 +1,8 @@
 # n8n-nodes-sip-pbx
 
-SIP PBX community nodes for `n8n` with a daemon-backed telephony runtime.
+SIP PBX community nodes for n8n with a daemon-backed telephony runtime.
 
-This package turns `n8n` into a workflow-driven SIP and media control surface for:
+This package turns n8n into a workflow-driven SIP and media control surface for:
 
 - inbound trunk calls
 - extension registration and interactive auth
@@ -19,7 +19,7 @@ Project links:
 - Homepage: <https://github.com/siptg/n8n-nodes-sip-pbx>
 - npm: <https://www.npmjs.com/package/n8n-nodes-sip-pbx>
 - Issues: <https://github.com/siptg/n8n-nodes-sip-pbx/issues>
-- Documentation wiki: <https://github.com/siptg/n8n-nodes-sip-pbx/wiki>
+- Wiki: <https://github.com/siptg/n8n-nodes-sip-pbx/wiki>
 
 ## Why this package exists
 
@@ -30,31 +30,20 @@ Most telephony workflows need more than a single SIP webhook:
 - bridge/media timing must be handled in a real runtime, not in ad-hoc JS
 - AI and WebSocket media integrations need the same leg model as SIP calls
 
-`n8n-nodes-sip-pbx` solves that by running a dedicated daemon and media worker layer behind two community nodes:
+`n8n-nodes-sip-pbx` solves that by running a dedicated daemon and media worker layer behind two community nodes: **SIP PBX Trigger** and **SIP PBX**.
 
-- `SIP PBX Trigger`
-- `SIP PBX`
-
-From the workflow point of view, you still work with plain `n8n` items and branches. The daemon owns the live SIP dialogs, RTP endpoints, media workers, queue state, and WebSocket media sessions.
+From the workflow point of view, you still work with plain n8n items and branches. The daemon owns the live SIP dialogs, RTP endpoints, media workers, queue state, and WebSocket media sessions.
 
 ## Highlights
 
 - Full SIP call control for inbound and outbound legs: ringing, answer, hangup, bridge, unbridge.
 - Blocking and background media operations with `mediaId`-based control.
-- `Wait For Event`, `Wait Media`, and `Wait For Dial Event` primitives for event-driven IVR and call loops.
+- **Wait For Event**, **Wait Media**, and **Wait For Dial Event** primitives for event-driven IVR and call loops.
 - Queue routing that owns operator dialing in the daemon instead of relying on fragile workflow races.
 - SIP extension registration plus interactive auth trigger flows.
-- WebSocket leg support through transport profiles:
-  - `generic`
-  - `openai_realtime`
-  - `gemini_live`
+- WebSocket leg support through transport profiles: **OpenAI Realtime**, **Gemini Live** and generic.
 - AI tool and voice-agent integration on top of live WebSocket legs.
-- Native audio/runtime support for:
-  - `PCMU`
-  - `PCMA`
-  - `G.722`
-  - `Opus`
-  - `G.729`
+- Native audio/runtime support for: **PCMU**, **PCMA**, **G.722**, **Opus** and **G.729**.
 
 ## What you can build
 
@@ -77,11 +66,7 @@ Typical workflows supported by the current public contract:
 
 ## SIP and media model
 
-The runtime is built around a few stable public IDs:
-
-- `legId`
-- `dialId`
-- `mediaId`
+The runtime is built around a few stable public IDs: `legId`, `dialId` and `mediaId`.
 
 That makes orchestration predictable:
 
@@ -91,7 +76,7 @@ That makes orchestration predictable:
 
 ## Media execution model
 
-`Play Audio`, `Play Tone`, and `Record Audio` support two execution styles.
+**Play Audio**, **Play Tone**, and **Record Audio** support two execution styles.
 
 ### Blocking
 
@@ -128,15 +113,7 @@ To save the position in the queue, the caller can be marked for a callback. When
 
 ## WebSocket media legs
 
-`Create Dial` supports mode `WebSocket`.
-
-Available transport profiles:
-
-- OpenAI Realtime API adapter
-- Gemini Live adapter
-- raw PCM-over-WebSocket integrations
-
-From the workflow side, a WebSocket leg still behaves like a normal PBX leg:
+**Create Dial** supports mode `WebSocket`, including AI profiles. From the workflow side, a WebSocket leg still behaves like a normal PBX leg:
 
 - it has `legId`
 - it can be bridged
@@ -149,26 +126,26 @@ This is the key design point: WebSocket media is not a separate workflow subsyst
 
 The current release includes two AI-related paths:
 
-### `Invoke AI Tool`
-
-Exposes a node as a callable tool for a live voice-agent session.
-
-### `Attach Voice Agent`
+### Attach Voice Agent
 
 Attaches voice-agent orchestration to a live WebSocket leg.
 
 This supports workflows where:
 
-- `Create Dial` creates the AI-backed WebSocket leg
-- `Bridge` connects it to a caller
-- `Attach Voice Agent` adds memory and tools
-- live tool calls are emitted into `AI Tool Call` trigger mode
+- **Create Dial** creates the AI-backed WebSocket leg
+- **Bridge** connects it to a caller
+- **Attach Voice Agent** adds memory and tools
+- live tool calls are emitted into **AI Tool Call** trigger mode
+
+### Invoke AI Tool
+
+Exposes a node as a callable tool for a live voice-agent session.
 
 ## Installation
 
-This package is intended for self-hosted `n8n`. You can install the package directly from a self‑hosted n8n web UI:
+This package is intended for self-hosted n8n. You can install the package directly from a self‑hosted n8n web UI:
 
-- in your self‑hosted n8n web UI go to Settings → Community Nodes
+- in your self‑hosted n8n Web UI go to Settings → Community Nodes
 - choose the option to install → paste `n8n-nodes-sip-pbx`
 
 ## Native runtime and supported targets

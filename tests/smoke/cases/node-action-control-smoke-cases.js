@@ -28,7 +28,7 @@ async function testCallWaitForEventRouting() {
   await withPatchedRuntime(fakeRuntime, sipPbxNodeModulePath, async ({ SipPbx }) => {
     const node = new SipPbx();
     Object.assign(node, createExecuteContext({
-      operation: "call.waitCallEvent",
+      operation: "call.wait",
       timeoutSeconds: 20,
       callOptions: { interdigitTimeoutSeconds: 0.8 },
       waitDtmfFallbackEnabled: true,
@@ -72,7 +72,7 @@ async function testCallWaitForEventRoutingMultipleLegs() {
   await withPatchedRuntime(fakeRuntime, sipPbxNodeModulePath, async ({ SipPbx }) => {
     const node = new SipPbx();
     Object.assign(node, createExecuteContext({
-      operation: "call.waitCallEvent",
+      operation: "call.wait",
       legIds: { item: [{ legId: "leg-call-1" }, { legId: "leg-call-2" }] },
       timeoutSeconds: 20,
       rules: {
@@ -108,7 +108,7 @@ async function testDialWaitForEventRouting() {
     const node = new SipPbx();
     Object.assign(node, createExecuteContext({
       resource: "dial",
-      operation: "dial.waitDialEvent",
+      operation: "dial.wait",
       dialTimeoutSeconds: 15,
       waitEventOutputs: [["ringing", "rejected"]],
     }, [{ json: { dialId: "dial-1" } }]));
@@ -141,7 +141,7 @@ async function testDialWaitForEventRoutingMultipleDials() {
     const node = new SipPbx();
     Object.assign(node, createExecuteContext({
       resource: "dial",
-      operation: "dial.waitDialEvent",
+      operation: "dial.wait",
       dialIds: { item: [{ dialId: "dial-1" }, { dialId: "dial-2" }] },
       dialTimeoutSeconds: 15,
       waitEventOutputs: [["ringing"]],
@@ -156,7 +156,7 @@ async function testDialWaitForEventRoutingMultipleDials() {
 }
 
 async function testQueueAndAuthResponses() {
-  const seen = { auth: [], record: [], stats: null };
+  const seen = { auth: [], record: [], recording: [], stats: null };
   const fakeRuntime = {
     async respondToAuth(input) {
       seen.auth.push(input);
@@ -175,6 +175,15 @@ async function testQueueAndAuthResponses() {
         };
       }
       return { recordRequestId: input.recordRequestId, active: false };
+    },
+    async startGlobalRecording(input) {
+      seen.recording.push(input);
+      return {
+        legId: input.legId,
+        filePath: input.recordFilePath,
+        durationMs: 4321,
+        bytesProduced: 512,
+      };
     },
     async getQueueStats(input) {
       seen.stats = input;
@@ -195,7 +204,7 @@ async function testQueueAndAuthResponses() {
     const authNode = new SipPbx();
     Object.assign(authNode, createExecuteContext({
       resource: "respond",
-      operation: "respond.respondToAuth",
+      operation: "respond.toAuth",
       authAction: "allow",
       extension: "",
     }, [{ json: { username: "100" }, _sipPbxResponseHandle: { kind: "auth", handle: "auth-1" } }]));
@@ -206,7 +215,7 @@ async function testQueueAndAuthResponses() {
     const authExplicitNode = new SipPbx();
     Object.assign(authExplicitNode, createExecuteContext({
       resource: "respond",
-      operation: "respond.respondToAuth",
+      operation: "respond.toAuth",
       respondOptions: { requestId: "auth-explicit" },
       authAction: "allow",
       extension: "",
@@ -217,7 +226,7 @@ async function testQueueAndAuthResponses() {
     const recordNode = new SipPbx();
     Object.assign(recordNode, createExecuteContext({
       resource: "respond",
-      operation: "respond.respondToRecord",
+      operation: "respond.toRecord",
       respondOptions: { requestId: "record-explicit" },
       active: false,
     }, [{ json: {} }]));
@@ -227,7 +236,7 @@ async function testQueueAndAuthResponses() {
     const recordWaitNode = new SipPbx();
     Object.assign(recordWaitNode, createExecuteContext({
       resource: "respond",
-      operation: "respond.respondToRecord",
+      operation: "respond.toRecord",
       respondOptions: { requestId: "record-wait", recordWavSampleRate: 8000, recordWavBitDepth: 16 },
       active: true,
       recordFilePath: "recordings/call.wav",
@@ -241,10 +250,25 @@ async function testQueueAndAuthResponses() {
     assert.strictEqual(recordWaitOutputs[0][0].json.durationMs, 1234);
     assert.strictEqual(recordWaitOutputs[0][0].json.sipPbx.mediaId, undefined);
 
+    const directRecordNode = new SipPbx();
+    Object.assign(directRecordNode, createExecuteContext({
+      resource: "recording",
+      operation: "recording.start",
+      recordFilePath: "recordings/direct.wav",
+      recordFileFormat: "wav",
+      recordSplitChannels: true,
+      waitForRecordingCompletion: true,
+      recordingOptions: { legId: "leg-record-direct", recordWavSampleRate: 16000, recordWavBitDepth: 16 },
+    }, [{ json: {} }]));
+    const directRecordOutputs = await directRecordNode.execute();
+    assert.strictEqual(directRecordOutputs[0][0].json.legId, "leg-record-direct");
+    assert.strictEqual(directRecordOutputs[0][0].json.filePath, "recordings/direct.wav");
+    assert.strictEqual(directRecordOutputs[0][0].json.durationMs, 4321);
+
     const statsNode = new SipPbx();
     Object.assign(statsNode, createExecuteContext({
       resource: "queue",
-      operation: "queue.getQueueStats",
+      operation: "queue.getStats",
       queueStatsTarget: "legId",
       queueOptions: { legId: "leg-queue-1" },
     }, [{ json: {} }]));
@@ -278,6 +302,15 @@ async function testQueueAndAuthResponses() {
     recordSplitChannels: true,
     waitForRecordingCompletion: true,
   });
+  assert.deepStrictEqual(seen.recording[0], {
+    legId: "leg-record-direct",
+    recordFilePath: "recordings/direct.wav",
+    recordFileFormat: "wav",
+    recordWavSampleRate: 16000,
+    recordWavBitDepth: 16,
+    recordSplitChannels: true,
+    waitForRecordingCompletion: true,
+  });
   assert.deepStrictEqual(seen.stats, {
     queueStatsTarget: "legId",
     ref: "",
@@ -291,6 +324,11 @@ async function testDialMakeAndBridge() {
   const fakeRuntime = {
     async makeDial(input) {
       seen.makeDial.push(input);
+      if (input.callMode === "extension" && Array.isArray(input.extensionNumbers) && input.extensionNumbers.includes("999")) {
+        const error = new Error("Extension dial requires active registrations");
+        error.code = "invalid_dial_targets";
+        throw error;
+      }
       if (input.callMode === "direct") {
         return { dialId: "dial-created-1", legId: "leg-created-1" };
       }
@@ -321,6 +359,23 @@ async function testDialMakeAndBridge() {
     }, [{ json: {} }]));
     const makeDialOutputs = await makeDialNode.execute();
     assert.strictEqual(makeDialOutputs[0][0].json.dialId, "dial-created-1");
+    assert.deepStrictEqual(makeDialOutputs[1], []);
+
+    const unavailableExtensionNode = new SipPbx();
+    Object.assign(unavailableExtensionNode, createExecuteContext({
+      resource: "dial",
+      operation: "dial.make",
+      callMode: "extension",
+      callStrategy: "parallel",
+      extensionNumbers: "999",
+      dialOptions: {
+        callerNumber: "+1999000",
+      },
+    }, [{ json: {} }]));
+    const unavailableOutputs = await unavailableExtensionNode.execute();
+    assert.deepStrictEqual(unavailableOutputs[0], []);
+    assert.strictEqual(unavailableOutputs[1][0].json.reason, "no_available_endpoints");
+    assert.deepStrictEqual(unavailableOutputs[1][0].json.extensionNumbers, ["999"]);
 
     const makeDirectDialNode = new SipPbx();
     Object.assign(makeDirectDialNode, createExecuteContext({
@@ -437,12 +492,13 @@ async function testOperationOnlyAnswerRouting() {
 
 async function testActionOperationContract() {
   const expectedOperationsByResource = {
-    call: ["call.ringing", "call.answer", "call.hangup", "call.bridge", "call.unbridge", "call.waitCallEvent", "call.controlRecording"],
-    dial: ["dial.make", "dial.break", "dial.waitDialEvent"],
-    media: ["media.playAudio", "media.playTone", "media.recordAudio", "media.stopMedia", "media.waitMedia", "media.sendDtmf"],
-    queue: ["queue.enqueueLeg", "queue.setQueueCallback", "queue.getQueueStats"],
+    call: ["call.ringing", "call.answer", "call.hangup", "call.bridge", "call.unbridge", "call.wait"],
+    dial: ["dial.make", "dial.break", "dial.wait"],
+    media: ["media.playAudio", "media.playTone", "media.recordAudio", "media.stopMedia", "media.wait", "media.sendDtmf"],
+    queue: ["queue.putLeg", "queue.setCallback", "queue.getStats"],
+    recording: ["recording.start", "recording.control"],
     ai: ["ai.attachVoiceAgent", "ai.invokeAiTool"],
-    respond: ["respond.respondToRecord", "respond.respondToAuth", "respond.respondToAiTool"],
+    respond: ["respond.toRecord", "respond.toAuth", "respond.toAiTool"],
   };
 
   await withPatchedRuntime({}, sipPbxNodeModulePath, async ({ SipPbx }) => {
@@ -452,7 +508,11 @@ async function testActionOperationContract() {
     const resourceProperty = propertyByName.get("resource");
     assert.deepStrictEqual(
       resourceProperty.options.map((option) => option.value),
-      ["call", "dial", "media", "queue", "ai", "respond"],
+      ["call", "dial", "media", "queue", "recording", "ai", "respond"],
+    );
+    assert.strictEqual(
+      resourceProperty.options.find((option) => option.value === "recording").name,
+      "Global recording",
     );
     const operationProperties = properties.filter((property) => property.name === "operation");
     assert.strictEqual(operationProperties.length, Object.keys(expectedOperationsByResource).length);
@@ -466,14 +526,27 @@ async function testActionOperationContract() {
       assert.strictEqual(property.required, true);
     }
     const queueOperationIndex = operationProperties.findIndex((property) => property.displayOptions.show.resource.includes("queue"));
+    const recordingOperationIndex = operationProperties.findIndex((property) => property.displayOptions.show.resource.includes("recording"));
     const aiOperationIndex = operationProperties.findIndex((property) => property.displayOptions.show.resource.includes("ai"));
     const respondOperationIndex = operationProperties.findIndex((property) => property.displayOptions.show.resource.includes("respond"));
     assert.ok(queueOperationIndex >= 0, "missing queue operation property");
+    assert.ok(recordingOperationIndex >= 0, "missing recording operation property");
     assert.ok(aiOperationIndex >= 0, "missing ai operation property");
     assert.ok(respondOperationIndex >= 0, "missing respond operation property");
-    assert.ok(aiOperationIndex > queueOperationIndex, "ai operations should be below queue operations");
+    assert.ok(recordingOperationIndex > queueOperationIndex, "recording operations should be below queue operations");
+    assert.ok(aiOperationIndex > recordingOperationIndex, "ai operations should be below recording operations");
     assert.ok(respondOperationIndex > aiOperationIndex, "respond operations should be below ai operations");
-    for (const name of ["callOptions", "dialOptions", "mediaOptions", "respondOptions", "queueOptions", "aiOptions"]) {
+    const recordingOperationProperty = operationProperties.find((property) => property.displayOptions.show.resource.includes("recording"));
+    assert.deepStrictEqual(
+      recordingOperationProperty.options.map((option) => option.name),
+      ["Start recording", "Control recording"],
+    );
+    const respondOperationProperty = operationProperties.find((property) => property.displayOptions.show.resource.includes("respond"));
+    assert.ok(
+      respondOperationProperty.options.some((option) => option.value === "respond.toRecord" && option.name === "Respond to recording"),
+      "respond recording operation label should be updated",
+    );
+    for (const name of ["callOptions", "dialOptions", "mediaOptions", "respondOptions", "queueOptions", "recordingOptions", "aiOptions"]) {
       const matching = properties.filter((property) => property.name === name);
       assert.ok(matching.length > 0, `missing property: ${name}`);
       for (const property of matching) {
@@ -504,7 +577,7 @@ async function testActionOperationContract() {
     const sendDtmfOptionsIndex = properties.findIndex((property) => property.name === "mediaOptions" && property.displayOptions?.show?.operation?.includes("media.sendDtmf"));
     assert.ok(sendDtmfOptionsIndex >= 0, "missing mediaOptions for sendDtmf");
     const queueTargetIndex = properties.findIndex((property) => property.name === "queueStatsTarget");
-    const queueRefIndex = properties.findIndex((property) => property.name === "ref" && property.displayOptions?.show?.resource?.includes("queue") && property.displayOptions?.show?.operation?.includes("queue.getQueueStats"));
+    const queueRefIndex = properties.findIndex((property) => property.name === "ref" && property.displayOptions?.show?.resource?.includes("queue") && property.displayOptions?.show?.operation?.includes("queue.getStats"));
     assert.ok(queueTargetIndex >= 0, "missing queueStatsTarget");
     assert.ok(queueRefIndex >= 0, "missing queue ref");
     assert.ok(queueRefIndex > queueTargetIndex, "queue ref should be placed below Target");
@@ -557,17 +630,27 @@ async function testActionOperationContract() {
     assert.strictEqual(propertyByName.get("dtmfDurationMs"), undefined);
     assert.strictEqual(propertyByName.get("dtmfGapMs"), undefined);
     const bridgeCallOptions = properties.find((property) => property.name === "callOptions" && property.displayOptions?.show?.operation?.includes("call.bridge"));
-    const waitCallOptions = properties.find((property) => property.name === "callOptions" && property.displayOptions?.show?.operation?.includes("call.waitCallEvent"));
-    const waitCallTimeoutProperty = properties.find((property) => property.name === "timeoutSeconds" && property.displayOptions?.show?.operation?.includes("call.waitCallEvent"));
+    const waitCallOptions = properties.find((property) => property.name === "callOptions" && property.displayOptions?.show?.operation?.includes("call.wait"));
+    const waitCallTimeoutProperty = properties.find((property) => property.name === "timeoutSeconds" && property.displayOptions?.show?.operation?.includes("call.wait"));
     assert.ok(bridgeCallOptions, "missing call.bridge callOptions");
-    assert.ok(waitCallOptions, "missing call.waitCallEvent callOptions");
-    assert.ok(waitCallTimeoutProperty, "missing call.waitCallEvent timeoutSeconds");
+    assert.ok(waitCallOptions, "missing call.wait callOptions");
+    assert.ok(waitCallTimeoutProperty, "missing call.wait timeoutSeconds");
     assert.doesNotMatch(waitCallTimeoutProperty.description || "", /wait indefinitely/i);
     assert.ok(bridgeCallOptions.options.some((option) => option.name === "emitDtmfEvents"));
     assert.ok(bridgeCallOptions.options.some((option) => option.name === "relayDtmf"));
     assert.ok(!bridgeCallOptions.options.some((option) => option.name === "relaySignaling"));
     assert.ok(waitCallOptions.options.some((option) => option.name === "interdigitTimeoutSeconds"));
     const mediaOptionCollections = properties.filter((property) => property.name === "mediaOptions");
+    const directRecordingActiveProperty = properties.find((property) =>
+      property.name === "active"
+      && property.displayOptions?.show?.resource?.includes("recording")
+      && property.displayOptions?.show?.operation?.includes("recording.start"));
+    const respondRecordingActiveProperty = properties.find((property) =>
+      property.name === "active"
+      && property.displayOptions?.show?.resource?.includes("respond")
+      && property.displayOptions?.show?.operation?.includes("respond.toRecord"));
+    assert.strictEqual(directRecordingActiveProperty, undefined);
+    assert.ok(respondRecordingActiveProperty, "respond recording should still expose active");
     const stopMediaIdOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.stopMedia") && property.displayOptions?.show?.stopMediaTarget?.includes("mediaId"));
     const stopMediaLegOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.stopMedia") && property.displayOptions?.show?.stopMediaTarget?.includes("legId"));
     const playAudioLegOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.playAudio"));

@@ -7,6 +7,7 @@ import { LEG_STATUS_ENDED } from "../../../shared/result-events";
 import { LegCoordinator } from "../../legs/leg-coordinator";
 import { daemonError } from "../../core/daemon-error";
 import { InteractiveAuthService } from "../../extensions-auth/interactive-auth-service";
+import { TriggerAuthBridge } from "../extensions/extension-auth-bridge";
 import type { DialTarget, ExtensionDialTarget } from "../../dials/types";
 import { LegService } from "../../legs/leg-service";
 import { ExtensionHost } from "../extensions/extension-host";
@@ -26,7 +27,7 @@ import { formatSipRequest, formatSipResponse, getSipHeader, parseContactHeader, 
 import { buildLocalSipSdp, parseSipSdp } from "./sip-sdp";
 import { parseSipNameAddress, parseSipUri } from "./sip-uri";
 
-type ExtensionsHost = {
+type SipHostBase = {
   ref: string;
   publicRef: string;
   socket: dgram.Socket;
@@ -34,21 +35,21 @@ type ExtensionsHost = {
   bindPort: number;
   advertisedIp: string;
   realm: string;
+};
+
+type ExtensionsHost = SipHostBase & {
   authMode: string;
   authorizationUsernamePrefix: string;
   continueTraversalOnAuthReject: boolean;
   staticCredentials: Array<{ username: string; password: string; extension: string }>;
 };
 
-type TrunkHost = {
-  ref: string;
-  publicRef: string;
+type TrunkHost = SipHostBase & {
   routeToken: string;
-  socket: dgram.Socket;
-  bindIp: string;
-  bindPort: number;
   credentials: Record<string, unknown>;
-  registerOnStart: boolean;
+  registerMode: boolean;
+  authTimeoutMs: number;
+  continueTraversalOnAuthReject: boolean;
   registrationExpires: number;
   registerHeaders: SipHeaderEntry[];
   registrationTimer: ReturnType<typeof setTimeout> | null;
@@ -70,7 +71,13 @@ type TrunkHost = {
   } | null;
 };
 
-type ExtensionsAuthResolution = {
+type SipUdpListener = {
+  socket: dgram.Socket;
+  bindIp: string;
+  bindPort: number;
+};
+
+type SipAuthOutcome = {
   allow: boolean;
   extension?: string;
   statusCode?: number;
@@ -79,6 +86,8 @@ type ExtensionsAuthResolution = {
   notApplicable?: boolean;
   challenge?: boolean;
 };
+
+type SipAuthRequestKind = "register" | "invite";
 
 type InboundSipSession = {
   legId: string;
@@ -171,6 +180,7 @@ const SIP_T2_MS = 4000;
 const SIP_TRANSACTION_LIFETIME_MS = 64 * SIP_T1_MS;
 const SIP_REGISTER_RETRY_DELAY_MS = 5000;
 const LOOPBACK_SIP_HOST = "127.0.0.1";
+const SIP_ALLOWED_METHODS = ["REGISTER", "INVITE", "CANCEL", "ACK", "BYE", "INFO"];
 
 function randomTag(prefix: string): string {
   return `${prefix}-${randomBytes(6).toString("hex")}`;
@@ -185,12 +195,55 @@ function normalizeSipBindIp(value: unknown): string {
   return bindIp || OPTION_DEFAULTS.sip.bindIp;
 }
 
-function normalizeExtensionsBindPort(value: unknown): number {
+function normalizeOptionalBindPort(value: unknown, fallback: number): number {
   if (value == null || value === "") {
-    return OPTION_DEFAULTS.trigger.extensions.localBindPort;
+    return fallback;
   }
   const port = Number(value);
-  return Number.isFinite(port) ? port : OPTION_DEFAULTS.trigger.extensions.localBindPort;
+  return Number.isFinite(port) ? port : fallback;
+}
+
+function pickListenerValue(...sources: unknown[]): unknown {
+  for (const value of sources) {
+    if (value == null) {
+      continue;
+    }
+    if (typeof value === "string" && value.trim() === "") {
+      continue;
+    }
+    return value;
+  }
+  return undefined;
+}
+
+type SipListenerSettings = {
+  transport: string;
+  bindIp: string;
+  bindPort: number;
+  advertisedIp: string;
+  realm: string;
+};
+
+function prepareSipListenerSettings(input: {
+  scope: "trunk" | "extensions";
+  transport: unknown;
+  localBindIp: unknown;
+  localBindPort: unknown;
+  advertisedIp: unknown;
+  realm: unknown;
+  defaultBindPort: number;
+  defaultRealm: string;
+}): SipListenerSettings {
+  const transport = String(input.transport || OPTION_DEFAULTS.sip.transport).trim().toLowerCase();
+  if (transport !== OPTION_DEFAULTS.sip.transport) {
+    const label = input.scope === "trunk" ? "Trunk trigger" : "Extensions trigger";
+    throw daemonError("unsupported_transport", `${label} transport ${transport} is not implemented`);
+  }
+  const bindIp = normalizeSipBindIp(input.localBindIp);
+  const bindPort = normalizeOptionalBindPort(input.localBindPort, input.defaultBindPort);
+  const advertisedIp = normalizeSipAdvertisedHost(input.advertisedIp, bindIp);
+  const realm = String(input.realm || advertisedIp || input.defaultRealm).trim() || input.defaultRealm;
+  return { transport, bindIp, bindPort, advertisedIp, realm };
 }
 
 function getDefaultAdvertisedSipHost(): string {
@@ -220,6 +273,17 @@ function normalizeSipAdvertisedHost(preferred: unknown, fallback?: unknown): str
 
 function normalizeAuthorizationUsernamePrefix(value: unknown): string {
   return String(value || "").trim();
+}
+
+function normalizeStaticCredentials(value: unknown): Array<{ username: string; password: string; extension: string }> {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return (value as Array<Record<string, unknown>>).map((entry) => ({
+    username: String(entry.username || "").trim(),
+    password: String(entry.password || "").trim(),
+    extension: String(entry.extension || "").trim(),
+  }));
 }
 
 function normalizeDialDestinationUser(target: string): string {
@@ -275,19 +339,31 @@ function canReuseUdpEndpointForSameRef(existing: { bindIp: string; bindPort: num
   return existing.bindIp === bindIp && (bindPort === 0 || existing.bindPort === bindPort);
 }
 
-function canShareUdpEndpoint(existing: { bindIp: string; bindPort: number }, bindIp: string, bindPort: number): boolean {
-  return existing.bindIp === bindIp && bindPort > 0 && existing.bindPort === bindPort;
-}
-
 function trunkRegistrationIdentity(credentials: Record<string, unknown>): string {
   return [
     credentials.sipServer,
     credentials.port,
     credentials.username,
     credentials.publicDomain,
-    credentials.realm,
     credentials.proxyServer,
   ].map((value) => String(value || "").trim()).join("|");
+}
+
+function normalizeTrunkRegisterMode(value: unknown): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const text = String(value || "").trim().toLowerCase();
+  if (!text) {
+    return OPTION_DEFAULTS.trigger.trunk.registerMode === "register";
+  }
+  if (text === "register" || text === "true" || text === "1" || text === "yes" || text === "on") {
+    return true;
+  }
+  if (text === "auth" || text === "none" || text === "false" || text === "0" || text === "no" || text === "off") {
+    return false;
+  }
+  return OPTION_DEFAULTS.trigger.trunk.registerMode === "register";
 }
 
 function sendUdp(socket: dgram.Socket, payload: string, port: number, host: string): Promise<void> {
@@ -307,6 +383,7 @@ export class SipTransportService {
   private readonly extensionService: ExtensionHost;
   private readonly trunkService: TrunkClient;
   private readonly authService: InteractiveAuthService;
+  private readonly trunkAuthBridge: Pick<TriggerAuthBridge, "createRequest">;
   private readonly ensureMediaTransportEndpoint: (legId: string) => Promise<Record<string, unknown>>;
   private readonly onAttemptRinging: (legId: string) => void;
   private readonly onAttemptProgress: (legId: string) => void;
@@ -315,6 +392,7 @@ export class SipTransportService {
   private readonly onInboundDtmf: (legId: string, digits: string) => void;
   private readonly extensionsHosts = new Map<string, ExtensionsHost>();
   private readonly trunkHosts = new Map<string, TrunkHost>();
+  private readonly udpListeners = new Map<string, SipUdpListener>();
   private readonly inboundSessions = new Map<string, InboundSipSession>();
   private readonly outboundStartups = new Map<string, PendingOutboundSipStartup>();
   private readonly outboundSessions = new Map<string, OutboundSipSession>();
@@ -328,6 +406,7 @@ export class SipTransportService {
     extensionService: ExtensionHost;
     trunkService: TrunkClient;
     authService: InteractiveAuthService;
+    trunkAuthBridge?: Pick<TriggerAuthBridge, "createRequest">;
     ensureMediaTransportEndpoint?: (legId: string) => Promise<Record<string, unknown>>;
     onAttemptRinging: (legId: string) => void;
     onAttemptProgress: (legId: string) => void;
@@ -340,6 +419,11 @@ export class SipTransportService {
     this.extensionService = input.extensionService;
     this.trunkService = input.trunkService;
     this.authService = input.authService;
+    this.trunkAuthBridge = input.trunkAuthBridge || ({
+      createRequest: () => {
+        throw daemonError("invalid_trigger", "No active trunk trigger for inbound auth");
+      },
+    });
     this.ensureMediaTransportEndpoint = input.ensureMediaTransportEndpoint || (async () => ({}));
     this.onAttemptRinging = input.onAttemptRinging;
     this.onAttemptProgress = input.onAttemptProgress;
@@ -355,92 +439,55 @@ export class SipTransportService {
     if (!ref) {
       throw daemonError("invalid_trigger", "Trigger ref is required");
     }
-    const transports = Array.isArray(config.extensionTransports)
-      ? (config.extensionTransports as unknown[]).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
+    const transports = Array.isArray(config.transports)
+      ? (config.transports as unknown[]).map((value) => String(value || "").trim().toLowerCase()).filter(Boolean)
       : [String(config.transport || OPTION_DEFAULTS.sip.transport).trim().toLowerCase()].filter(Boolean);
     const normalizedTransports = transports.length > 0 ? Array.from(new Set(transports)) : [...OPTION_DEFAULTS.trigger.extensions.transports];
     const unsupportedTransports = normalizedTransports.filter((transport) => transport !== OPTION_DEFAULTS.sip.transport);
     if (unsupportedTransports.length > 0) {
       throw daemonError("unsupported_transport", `Extensions trigger transports ${unsupportedTransports.join(", ")} are not implemented`);
     }
-    const bindIp = normalizeSipBindIp(config.extensionsLocalBindIp);
-    const bindPort = normalizeExtensionsBindPort(config.extensionsLocalBindPort);
+    const listener = prepareSipListenerSettings({
+      scope: "extensions",
+      transport: normalizedTransports[0],
+      localBindIp: config.localBindIp,
+      localBindPort: config.localBindPort,
+      advertisedIp: config.advertisedIp,
+      realm: config.realm,
+      defaultBindPort: OPTION_DEFAULTS.trigger.extensions.localBindPort,
+      defaultRealm: "extensions.local",
+    });
     const existing = this.extensionsHosts.get(ref);
-    if (existing && canReuseUdpEndpointForSameRef(existing, bindIp, bindPort)) {
+    if (existing && canReuseUdpEndpointForSameRef(existing, listener.bindIp, listener.bindPort)) {
+      this.assertSharedRealmCompatible(existing.bindIp, existing.bindPort, listener.realm);
       existing.publicRef = publicRef;
-      existing.advertisedIp = normalizeSipAdvertisedHost(config.advertisedIp, existing.bindIp);
-      existing.realm = String(config.realm || existing.advertisedIp || "extensions.local");
+      existing.advertisedIp = listener.advertisedIp;
+      existing.realm = listener.realm;
       existing.authMode = String(config.authMode || OPTION_DEFAULTS.trigger.extensions.authMode);
       existing.authorizationUsernamePrefix = normalizeAuthorizationUsernamePrefix(config.authorizationUsernamePrefix);
       existing.continueTraversalOnAuthReject = config.continueTraversalOnAuthReject === true;
-      existing.staticCredentials = Array.isArray(config.staticCredentials)
-        ? (config.staticCredentials as Array<Record<string, unknown>>).map((entry) => ({
-            username: String(entry.username || "").trim(),
-            password: String(entry.password || "").trim(),
-            extension: String(entry.extension || "").trim(),
-          }))
-        : [];
+      existing.staticCredentials = normalizeStaticCredentials(config.staticCredentials);
       return;
     }
-    const shared = Array.from(this.extensionsHosts.values()).find((candidate) => canShareUdpEndpoint(candidate, bindIp, bindPort)) || null;
-    if (shared) {
-      const advertisedIp = normalizeSipAdvertisedHost(config.advertisedIp, shared.bindIp);
-      const realm = String(config.realm || advertisedIp || "extensions.local");
-      if (shared.realm !== realm) {
-        throw daemonError("configuration_error", "Extensions triggers sharing a SIP listener must use the same realm");
-      }
-      await this.deactivateExtensionsTrigger(ref);
-      this.extensionsHosts.set(ref, {
-        ref,
-        publicRef,
-        socket: shared.socket,
-        bindIp: shared.bindIp,
-        bindPort: shared.bindPort,
-        advertisedIp,
-        realm,
-        authMode: String(config.authMode || OPTION_DEFAULTS.trigger.extensions.authMode),
-        authorizationUsernamePrefix: normalizeAuthorizationUsernamePrefix(config.authorizationUsernamePrefix),
-        continueTraversalOnAuthReject: config.continueTraversalOnAuthReject === true,
-        staticCredentials: Array.isArray(config.staticCredentials)
-          ? (config.staticCredentials as Array<Record<string, unknown>>).map((entry) => ({
-              username: String(entry.username || "").trim(),
-              password: String(entry.password || "").trim(),
-              extension: String(entry.extension || "").trim(),
-            }))
-          : [],
-      });
-      return;
+    if (listener.bindPort > 0) {
+      this.assertSharedRealmCompatible(listener.bindIp, listener.bindPort, listener.realm);
     }
     await this.deactivateExtensionsTrigger(ref);
-    const socket = dgram.createSocket("udp4");
-    const address = await waitForUdpBind(socket, bindPort, bindIp);
-    const advertisedIp = normalizeSipAdvertisedHost(config.advertisedIp, address.address || bindIp);
+    const acquired = await this.getOrCreateUdpListener(listener.bindIp, listener.bindPort);
+    const advertisedIp = normalizeSipAdvertisedHost(config.advertisedIp, acquired.bindIp);
     const host: ExtensionsHost = {
       ref,
       publicRef,
-      socket,
-      bindIp: String(address.address || bindIp),
-      bindPort: Number(address.port || bindPort),
+      socket: acquired.socket,
+      bindIp: acquired.bindIp,
+      bindPort: acquired.bindPort,
       advertisedIp,
-      realm: String(config.realm || advertisedIp || "extensions.local"),
+      realm: String(config.realm || advertisedIp || "extensions.local") || "extensions.local",
       authMode: String(config.authMode || OPTION_DEFAULTS.trigger.extensions.authMode),
       authorizationUsernamePrefix: normalizeAuthorizationUsernamePrefix(config.authorizationUsernamePrefix),
       continueTraversalOnAuthReject: config.continueTraversalOnAuthReject === true,
-      staticCredentials: Array.isArray(config.staticCredentials)
-        ? (config.staticCredentials as Array<Record<string, unknown>>).map((entry) => ({
-            username: String(entry.username || "").trim(),
-            password: String(entry.password || "").trim(),
-            extension: String(entry.extension || "").trim(),
-          }))
-        : [],
+      staticCredentials: normalizeStaticCredentials(config.staticCredentials),
     };
-    socket.on("message", (message, rinfo) => {
-      void this.handleExtensionsPacket(host, message, rinfo).catch((error) => {
-        console.error(
-          `[sip-pbx:signaling] extensions packet handling failed; ref=${host.ref}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
-        );
-      });
-    });
     this.extensionsHosts.set(ref, host);
   }
 
@@ -450,10 +497,8 @@ export class SipTransportService {
       return;
     }
     this.extensionsHosts.delete(ref);
-    const listenerStillUsed = Array.from(this.extensionsHosts.values()).some((candidate) => candidate.socket === host.socket);
-    if (!listenerStillUsed) {
-      this.clearTransactionsForSocket(host.socket);
-      host.socket.close();
+    if (!this.hasActiveHostsForEndpoint(host.bindIp, host.bindPort)) {
+      this.closeUdpListener(host.bindIp, host.bindPort);
     }
   }
 
@@ -466,65 +511,77 @@ export class SipTransportService {
     const credentials = (config.sipCredentials && typeof config.sipCredentials === "object")
       ? { ...(config.sipCredentials as Record<string, unknown>) }
       : {};
-    const transport = String(credentials.transport || OPTION_DEFAULTS.sip.transport).toLowerCase();
-    if (transport !== OPTION_DEFAULTS.sip.transport) {
-      throw daemonError("unsupported_transport", `Trunk trigger transport ${transport} is not implemented`);
-    }
-    const bindIp = normalizeSipBindIp(credentials.localBindIp);
-    const bindPort = Number(credentials.localBindPort || 0);
+    const registerMode = normalizeTrunkRegisterMode(config.trunkRegisterMode);
+    const listener = prepareSipListenerSettings({
+      scope: "trunk",
+      transport: pickListenerValue(config.transport, credentials.transport),
+      localBindIp: pickListenerValue(config.localBindIp, credentials.localBindIp),
+      localBindPort: pickListenerValue(config.localBindPort, credentials.localBindPort),
+      advertisedIp: pickListenerValue(config.advertisedIp, credentials.publicDomain),
+      realm: config.realm,
+      defaultBindPort: 0,
+      defaultRealm: "trunk.local",
+    });
+    const authTimeoutMs = Math.max(0, Math.round(Number(config.authTimeoutSeconds || OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds) * 1000));
     const existing = this.trunkHosts.get(ref);
-    if (existing && canReuseUdpEndpointForSameRef(existing, bindIp, bindPort)) {
-      const nextRegisterOnStart = Boolean(config.registerOnStart);
+    if (existing && canReuseUdpEndpointForSameRef(existing, listener.bindIp, listener.bindPort)) {
       const replaceRegistration = Boolean(
         existing.registration
         && trunkRegistrationIdentity(existing.credentials) !== trunkRegistrationIdentity(credentials),
       );
+      if (!registerMode) {
+        this.assertSharedRealmCompatible(existing.bindIp, existing.bindPort, listener.realm);
+      }
       this.clearTrunkRegistrationTimer(existing);
-      if (existing.registration && (!nextRegisterOnStart || replaceRegistration)) {
+      if (existing.registration && (!registerMode || replaceRegistration)) {
         try {
-          await this.sendTrunkRegister(existing, { expiresSeconds: 0 });
+          await this.sendTrunkRegister(existing, null, { expiresSeconds: 0 });
         } catch (error) {
           console.error(
-            `[sip-pbx:signaling] trunk unregister during trigger reuse failed; ref=${ref}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+            `[sip-pbx:signaling] trunk unregister during trigger reuse failed; ref=${ref}; error=${this.errorMessage(error)}`,
           );
         }
         existing.registration = null;
       }
       existing.credentials = credentials;
-      existing.registerOnStart = nextRegisterOnStart;
+      existing.publicRef = publicRef;
+      existing.registerMode = registerMode;
+      existing.advertisedIp = listener.advertisedIp;
+      existing.realm = listener.realm;
+      existing.authTimeoutMs = authTimeoutMs;
+      existing.continueTraversalOnAuthReject = config.continueTraversalOnAuthReject === true;
       existing.registrationExpires = Number(config.registrationExpires || OPTION_DEFAULTS.sip.registrationExpiresSeconds);
       existing.registerHeaders = this.normalizeHeaderEntries(config.registerHeaders);
-      if (existing.registerOnStart) {
+      if (existing.registerMode) {
         await this.sendTrunkRegister(existing);
       }
       return;
     }
+    if (listener.bindPort > 0 && !registerMode) {
+      this.assertSharedRealmCompatible(listener.bindIp, listener.bindPort, listener.realm);
+    }
     await this.deactivateTrunkTrigger(ref);
-    const socket = dgram.createSocket("udp4");
-    const address = await waitForUdpBind(socket, bindPort, bindIp);
+    const acquired = await this.getOrCreateUdpListener(listener.bindIp, listener.bindPort);
     const host: TrunkHost = {
       ref,
       publicRef,
       routeToken: randomTag("route"),
-      socket,
-      bindIp: String(address.address || bindIp),
-      bindPort: Number(address.port || bindPort),
+      socket: acquired.socket,
+      bindIp: acquired.bindIp,
+      bindPort: acquired.bindPort,
+      advertisedIp: normalizeSipAdvertisedHost(pickListenerValue(config.advertisedIp, credentials.publicDomain), acquired.bindIp),
+      realm: listener.realm,
       credentials,
-      registerOnStart: Boolean(config.registerOnStart),
+      registerMode,
+      authTimeoutMs,
+      continueTraversalOnAuthReject: config.continueTraversalOnAuthReject === true,
       registrationExpires: Number(config.registrationExpires || OPTION_DEFAULTS.sip.registrationExpiresSeconds),
       registerHeaders: this.normalizeHeaderEntries(config.registerHeaders),
       registrationTimer: null,
       registration: null,
     };
-    socket.on("message", (message, rinfo) => {
-      void this.handleTrunkPacket(host, message, rinfo).catch((error) => {
-        console.error(
-          `[sip-pbx:signaling] trunk packet handler failed; ref=${host.ref}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
-        );
-      });
-    });
     this.trunkHosts.set(ref, host);
-    if (host.registerOnStart) {
+    if (host.registerMode) {
       await this.sendTrunkRegister(host);
     }
   }
@@ -534,21 +591,21 @@ export class SipTransportService {
     if (!host) {
       return;
     }
-    host.registerOnStart = false;
     this.clearTrunkRegistrationTimer(host);
     this.trunkHosts.delete(ref);
     if (host.registration) {
       try {
-        await this.sendTrunkRegister(host, { expiresSeconds: 0 });
+        await this.sendTrunkRegister(host, null, { expiresSeconds: 0 });
       } catch (error) {
         console.error(
-          `[sip-pbx:signaling] trunk unregister during trigger deactivate failed; ref=${ref}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+          `[sip-pbx:signaling] trunk unregister during trigger deactivate failed; ref=${ref}; error=${this.errorMessage(error)}`,
         );
       }
     }
     host.registration = null;
-    this.clearTransactionsForSocket(host.socket);
-    host.socket.close();
+    if (!this.hasActiveHostsForEndpoint(host.bindIp, host.bindPort)) {
+      this.closeUdpListener(host.bindIp, host.bindPort);
+    }
   }
 
   async startAttempt(dial: SignalingDialView, legId: string, target: DialTarget): Promise<void> {
@@ -662,7 +719,7 @@ export class SipTransportService {
         socket.on("message", (message, rinfo) => {
           void this.handleOutboundPacket(session, message, rinfo).catch((error) => {
             console.error(
-              `[sip-pbx:signaling] outbound packet handling failed; leg=${legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+              `[sip-pbx:signaling] outbound packet handling failed; leg=${legId}; error=${this.errorMessage(error)}`,
             );
           });
         });
@@ -682,23 +739,7 @@ export class SipTransportService {
       return;
     }
     await this.sendOutboundInvite(session, {
-      onTimeout: () => {
-        if (!this.outboundSessions.has(legId)) {
-          return;
-        }
-        this.clearTransactionsForCallId(session.callId);
-        this.outboundSessions.delete(legId);
-        try {
-          if (session.ownsSocket) {
-            socket.close();
-          }
-        } catch (error) {
-          console.error(
-            `[sip-pbx:signaling] outbound attempt socket close failed on timeout; leg=${legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
-          );
-        }
-        this.onAttemptRejected(legId, "transaction_timeout");
-      },
+      onTimeout: () => this.handleOutboundInviteTimeout(session, "transaction_timeout"),
     });
   }
 
@@ -766,7 +807,7 @@ export class SipTransportService {
             requestUri: inbound.requestUri,
             remoteAddress: inbound.remoteAddress,
             remotePort: inbound.remotePort,
-            viaHost: inbound.contactUri.replace(/^sip:[^@]+@/, ""),
+            viaHost: this.viaHostFromContactUri(inbound.contactUri),
             from: this.toHeaderWithTag(inbound.to, inbound.localTag),
             to: inbound.from,
             callId: inbound.callId,
@@ -774,13 +815,13 @@ export class SipTransportService {
             contactUri: inbound.contactUri,
           }).catch((error) => {
             console.error(
-              `[sip-pbx:signaling] inbound BYE send failed; leg=${legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+              `[sip-pbx:signaling] inbound BYE send failed; leg=${legId}; error=${this.errorMessage(error)}`,
             );
           });
         } else {
           await this.sendInboundResponse(inbound, 603, this.reasonPhraseFromHangup(reason)).catch((error) => {
             console.error(
-              `[sip-pbx:signaling] inbound reject response failed; leg=${legId}; reason=${reason}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+              `[sip-pbx:signaling] inbound reject response failed; leg=${legId}; reason=${reason}; error=${this.errorMessage(error)}`,
             );
           });
         }
@@ -805,7 +846,7 @@ export class SipTransportService {
           requestUri: outbound.requestUri,
           remoteAddress: outbound.remoteAddress,
           remotePort: outbound.remotePort,
-          viaHost: outbound.contactUri.replace(/^sip:[^@]+@/, ""),
+          viaHost: this.viaHostFromContactUri(outbound.contactUri),
           from: outbound.from,
           to: outbound.to,
           callId: outbound.callId,
@@ -820,7 +861,7 @@ export class SipTransportService {
           },
         }).catch((error) => {
           console.error(
-            `[sip-pbx:signaling] outbound BYE failed; leg=${legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+            `[sip-pbx:signaling] outbound BYE failed; leg=${legId}; error=${this.errorMessage(error)}`,
           );
           this.clearTransactionsForCallId(outbound.callId);
           this.finalizeOutboundSocket(outbound);
@@ -829,7 +870,7 @@ export class SipTransportService {
         outbound.state = "cancelling";
         await this.sendOutboundCancel(outbound).catch((error) => {
           console.error(
-            `[sip-pbx:signaling] outbound CANCEL failed; leg=${legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+            `[sip-pbx:signaling] outbound CANCEL failed; leg=${legId}; error=${this.errorMessage(error)}`,
           );
           this.clearTransactionsForCallId(outbound.callId);
           this.finalizeOutboundSocket(outbound);
@@ -854,7 +895,7 @@ export class SipTransportService {
         requestUri: inbound.requestUri,
         remoteAddress: inbound.remoteAddress,
         remotePort: inbound.remotePort,
-        viaHost: inbound.contactUri.replace(/^sip:[^@]+@/, ""),
+        viaHost: this.viaHostFromContactUri(inbound.contactUri),
         from: this.toHeaderWithTag(inbound.to, inbound.localTag),
         to: inbound.from,
         callId: inbound.callId,
@@ -875,7 +916,7 @@ export class SipTransportService {
         requestUri: outbound.requestUri,
         remoteAddress: outbound.remoteAddress,
         remotePort: outbound.remotePort,
-        viaHost: outbound.contactUri.replace(/^sip:[^@]+@/, ""),
+        viaHost: this.viaHostFromContactUri(outbound.contactUri),
         from: outbound.from,
         to: outbound.to,
         callId: outbound.callId,
@@ -928,16 +969,29 @@ export class SipTransportService {
     }
   }
 
+  private handleOutboundInviteTimeout(session: OutboundSipSession, reason: string): void {
+    if (!this.outboundSessions.has(session.legId)) {
+      return;
+    }
+    this.clearTransactionsForCallId(session.callId);
+    this.outboundSessions.delete(session.legId);
+    try {
+      if (session.ownsSocket) {
+        session.socket.close();
+      }
+    } catch (error) {
+      console.error(
+        `[sip-pbx:signaling] outbound attempt socket close failed on timeout; leg=${session.legId}; error=${this.errorMessage(error)}`,
+      );
+    }
+    this.onAttemptRejected(session.legId, reason);
+  }
+
   private async withLegLock<T>(legId: string, callback: () => Promise<T> | T): Promise<T> {
     return await this.legCoordinator.withLeg(legId, callback);
   }
 
   closeAll(): void {
-    const activeLegIds = new Set<string>([
-      ...this.inboundSessions.keys(),
-      ...this.outboundStartups.keys(),
-      ...this.outboundSessions.keys(),
-    ]);
     for (const ref of Array.from(this.extensionsHosts.keys())) {
       void this.deactivateExtensionsTrigger(ref);
     }
@@ -964,136 +1018,162 @@ export class SipTransportService {
   }
 
   getExtensionsEndpoint(ref: string): { host: string; port: number } | null {
-    const host = this.extensionsHosts.get(ref);
-    if (!host) {
-      return null;
-    }
-    return { host: normalizeLocalEndpointHost(host.bindIp), port: host.bindPort };
+    return this.getHostEndpoint(this.extensionsHosts, ref);
   }
 
   getTrunkEndpoint(ref: string): { host: string; port: number } | null {
-    const host = this.trunkHosts.get(ref);
+    return this.getHostEndpoint(this.trunkHosts, ref);
+  }
+
+  private getHostEndpoint<H extends SipHostBase>(map: Map<string, H>, ref: string): { host: string; port: number } | null {
+    const host = map.get(ref);
     if (!host) {
       return null;
     }
     return { host: normalizeLocalEndpointHost(host.bindIp), port: host.bindPort };
   }
 
-  private getTrunkAdvertisedHost(host: TrunkHost): string {
-    return normalizeSipAdvertisedHost(host.credentials.publicDomain, host.bindIp);
+  private assertSharedRealmCompatible(bindIp: string, bindPort: number, realm: string): void {
+    const sharedRealm = this.getSharedAuthRealm(bindIp, bindPort);
+    if (sharedRealm && sharedRealm !== realm) {
+      throw daemonError("configuration_error", "SIP triggers sharing a listener must use the same realm");
+    }
+  }
+
+  private getSharedAuthRealm(bindIp: string, bindPort: number): string | null {
+    const extensionRealm = this.listExtensionsHostsForEndpoint(bindIp, bindPort)[0]?.realm || null;
+    if (extensionRealm) {
+      return extensionRealm;
+    }
+    return this.listTrunkHostsForEndpoint(bindIp, bindPort)
+      .find((candidate) => !candidate.registerMode)
+      ?.realm || null;
+  }
+
+  private listenerKey(bindIp: string, bindPort: number): string {
+    return `${bindIp}:${bindPort}`;
+  }
+
+  private async getOrCreateUdpListener(bindIp: string, bindPort: number): Promise<SipUdpListener> {
+    if (bindPort > 0) {
+      const existing = this.udpListeners.get(this.listenerKey(bindIp, bindPort));
+      if (existing) {
+        return existing;
+      }
+    }
+    const socket = dgram.createSocket("udp4");
+    const address = await waitForUdpBind(socket, bindPort, bindIp);
+    const listener: SipUdpListener = {
+      socket,
+      bindIp: String(address.address || bindIp),
+      bindPort: Number(address.port || bindPort),
+    };
+    this.udpListeners.set(this.listenerKey(listener.bindIp, listener.bindPort), listener);
+    socket.on("message", (message, rinfo) => {
+      void this.handleEndpointDatagram(listener, message, rinfo).catch((error) => {
+        console.error(
+          `[sip-pbx:signaling] udp listener packet handler failed; bind=${listener.bindIp}:${listener.bindPort}; error=${this.errorMessage(error)}`,
+        );
+      });
+    });
+    return listener;
+  }
+
+  private hasActiveHostsForEndpoint(bindIp: string, bindPort: number): boolean {
+    return this.listTrunkHostsForEndpoint(bindIp, bindPort).length > 0
+      || this.listExtensionsHostsForEndpoint(bindIp, bindPort).length > 0;
+  }
+
+  private closeUdpListener(bindIp: string, bindPort: number): void {
+    const key = this.listenerKey(bindIp, bindPort);
+    const listener = this.udpListeners.get(key);
+    if (!listener) {
+      return;
+    }
+    this.udpListeners.delete(key);
+    this.clearTransactionsForSocket(listener.socket);
+    listener.socket.close();
   }
 
   private async handleExtensionsPacket(host: ExtensionsHost, rawMessage: Buffer, rinfo: dgram.RemoteInfo): Promise<void> {
-    const message = parseSipMessage(rawMessage);
-    if (!message) {
-      return;
-    }
-    if (message.statusCode) {
-      const outboundSession = this.findOutboundSession(host.socket, message);
-      if (outboundSession) {
-        await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
-        return;
-      }
-      this.noteOutboundTransactionResponse(message);
-      return;
-    }
-    if (!message.method) {
-      return;
-    }
-    try {
-      if (message.method === "REGISTER") {
-        await this.handleExtensionsRegister(host, message, rinfo);
-        return;
-      }
-      if (message.method === "INVITE") {
-        const outboundSession = this.findOutboundSession(host.socket, message);
-        if (outboundSession) {
-          await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
-          return;
-        }
-        await this.handleExtensionsInvite(host, message, rinfo);
-        return;
-      }
-      if (message.method === "CANCEL") {
-        await this.handleInboundCancel(host.socket, host.advertisedIp, host.bindPort, message, rinfo);
-        return;
-      }
-      if (message.method === "ACK") {
-        this.handleInboundAck(message);
-        return;
-      }
-      if (message.method === "BYE") {
-        const outboundSession = this.findOutboundSession(host.socket, message);
-        if (outboundSession) {
-          await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
-          return;
-        }
-        await this.handleInDialogBye(host.socket, host.advertisedIp, host.bindPort, message, rinfo);
-        return;
-      }
-      if (message.method === "INFO") {
-        const outboundSession = this.findOutboundSession(host.socket, message);
-        if (outboundSession) {
-          await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
-          return;
-        }
-        await this.handleInDialogInfo(message, rinfo);
-        return;
-      }
-      await this.sendNotImplementedResponse(host.socket, message, rinfo, host.advertisedIp, host.bindPort, ["REGISTER", "INVITE", "CANCEL", "ACK", "BYE", "INFO"]);
-    } catch (error) {
-      this.reportSipPacketError("extensions", message, error);
-      await this.sendInternalErrorResponse(host.socket, message, rinfo, host.advertisedIp, host.bindPort);
-    }
+    await this.handleEndpointDatagram(host, rawMessage, rinfo);
   }
 
   private async handleTrunkPacket(host: TrunkHost, rawMessage: Buffer, rinfo: dgram.RemoteInfo): Promise<void> {
+    await this.handleEndpointDatagram(host, rawMessage, rinfo);
+  }
+
+  private async handleEndpointDatagram(
+    source: { socket: dgram.Socket; bindIp: string; bindPort: number },
+    rawMessage: Buffer,
+    rinfo: dgram.RemoteInfo,
+  ): Promise<void> {
     const message = parseSipMessage(rawMessage);
     if (!message) {
       return;
     }
+    await this.handleEndpointPacket(source.socket, source.bindIp, source.bindPort, message, rinfo);
+  }
+
+  private async handleEndpointPacket(
+    socket: dgram.Socket,
+    bindIp: string,
+    bindPort: number,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+  ): Promise<void> {
+    const extensionsHost = this.listExtensionsHostsForEndpoint(bindIp, bindPort)[0] || null;
+    const trunkHosts = this.listTrunkHostsForEndpoint(bindIp, bindPort);
+    const fallbackAdvertisedHost = extensionsHost?.advertisedIp
+      || trunkHosts[0]?.advertisedIp
+      || normalizeSipAdvertisedHost("", bindIp);
     try {
       if (message.statusCode) {
-        const outboundSession = this.findOutboundSession(host.socket, message);
+        const outboundSession = this.findOutboundSession(socket, message);
         if (outboundSession) {
           await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
           return;
         }
         this.noteOutboundTransactionResponse(message);
-        if (await this.handleTrunkRegisterResponse(host, message, rinfo)) {
-          return;
+        for (const candidate of trunkHosts) {
+          if (await this.handleTrunkRegisterResponse(candidate, message, rinfo)) {
+            return;
+          }
         }
         return;
       }
+      if (!message.method) {
+        return;
+      }
+      if (message.method === "REGISTER") {
+        if (await this.handleDirectInboundTrunkByEndpoint(bindIp, bindPort, message, rinfo, "register")) {
+          return;
+        }
+        if (extensionsHost) {
+          await this.handleExtensionsRequest(extensionsHost, message, rinfo, "register");
+          return;
+        }
+        await this.sendNotImplementedResponse(socket, message, rinfo, fallbackAdvertisedHost, bindPort);
+        return;
+      }
       if (message.method === "INVITE") {
-        const outboundSession = this.findOutboundSession(host.socket, message);
+        const outboundSession = this.findOutboundSession(socket, message);
         if (outboundSession) {
           await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
           return;
         }
-        const advertisedHost = this.getTrunkAdvertisedHost(host);
-        if (!this.hasValidTrunkRouteToken(host, message)) {
-          await this.sendStatelessResponse(host.socket, message, rinfo, 404, "Not Found", advertisedHost, host.bindPort);
+        if (await this.handleOrderedTrunkInviteByEndpoint(bindIp, bindPort, message, rinfo)) {
           return;
         }
-        if (await this.replayServerTransaction(host.socket, message, rinfo)) {
+        if (extensionsHost) {
+          await this.handleExtensionsRequest(extensionsHost, message, rinfo, "invite");
           return;
         }
-        const transactionKey = this.beginServerTransaction(message);
-        try {
-          const invite = this.createInboundInvite(host.ref, host.publicRef || host.ref, message, "sip");
-          const result = this.trunkService.emitInboundInvite(invite);
-          this.prepareInboundRtpSession(result.legId, host.bindIp, advertisedHost, message, rinfo);
-          this.inboundSessions.set(result.legId, this.createInboundSession(host.socket, result.legId, message, rinfo, advertisedHost, host.bindPort));
-          await this.sendStatelessResponse(host.socket, message, rinfo, 100, "Trying", advertisedHost, host.bindPort);
-        } catch (error) {
-          this.clearServerTransaction(transactionKey);
-          throw error;
-        }
+        await this.sendStatelessResponse(socket, message, rinfo, 404, "Not Found", fallbackAdvertisedHost, bindPort);
         return;
       }
       if (message.method === "CANCEL") {
-        await this.handleInboundCancel(host.socket, this.getTrunkAdvertisedHost(host), host.bindPort, message, rinfo);
+        await this.handleInboundCancel(socket, fallbackAdvertisedHost, bindPort, message, rinfo);
         return;
       }
       if (message.method === "ACK") {
@@ -1101,16 +1181,16 @@ export class SipTransportService {
         return;
       }
       if (message.method === "BYE") {
-        const outboundSession = this.findOutboundSession(host.socket, message);
+        const outboundSession = this.findOutboundSession(socket, message);
         if (outboundSession) {
           await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
           return;
         }
-        await this.handleInDialogBye(host.socket, this.getTrunkAdvertisedHost(host), host.bindPort, message, rinfo);
+        await this.handleInDialogBye(socket, fallbackAdvertisedHost, bindPort, message, rinfo);
         return;
       }
       if (message.method === "INFO") {
-        const outboundSession = this.findOutboundSession(host.socket, message);
+        const outboundSession = this.findOutboundSession(socket, message);
         if (outboundSession) {
           await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
           return;
@@ -1118,16 +1198,21 @@ export class SipTransportService {
         await this.handleInDialogInfo(message, rinfo);
         return;
       }
-      await this.sendNotImplementedResponse(host.socket, message, rinfo, this.getTrunkAdvertisedHost(host), host.bindPort, ["INVITE", "CANCEL", "ACK", "BYE", "INFO"]);
+      await this.sendNotImplementedResponse(socket, message, rinfo, fallbackAdvertisedHost, bindPort);
     } catch (error) {
-      this.reportSipPacketError("trunk", message, error);
+      this.reportSipPacketError(trunkHosts.length > 0 ? "trunk" : "extensions", message, error);
       if (!message.statusCode) {
-        await this.sendInternalErrorResponse(host.socket, message, rinfo, this.getTrunkAdvertisedHost(host), host.bindPort);
+        await this.sendInternalErrorResponse(socket, message, rinfo, fallbackAdvertisedHost, bindPort);
       }
     }
   }
 
-  private async handleExtensionsRegister(host: ExtensionsHost, message: SipMessage, rinfo: dgram.RemoteInfo): Promise<void> {
+  private async handleExtensionsRequest(
+    host: ExtensionsHost,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    requestType: SipAuthRequestKind,
+  ): Promise<void> {
     if (await this.replayServerTransaction(host.socket, message, rinfo)) {
       return;
     }
@@ -1135,9 +1220,9 @@ export class SipTransportService {
     try {
       const endpointExtension = this.extractEndpointExtension(message);
       const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
-      let fallbackRejectResponse: ExtensionsAuthResolution | null = null;
-      for (const candidate of this.listExtensionsHostsForListener(host)) {
-        const authResponse = await this.resolveExtensionsAuth(candidate, message, "register", endpointExtension, authorization, rinfo);
+      let fallbackRejectResponse: SipAuthOutcome | null = null;
+      for (const candidate of this.listExtensionsHostsForEndpoint(host.bindIp, host.bindPort)) {
+        const authResponse = await this.resolveExtensionsAuth(candidate, message, requestType, endpointExtension, authorization, rinfo);
         if (authResponse.notApplicable) {
           continue;
         }
@@ -1149,32 +1234,17 @@ export class SipTransportService {
           await this.sendExtensionsAuthFailure(host, message, rinfo, authResponse);
           return;
         }
-        const extensionNumber = String(authResponse.extension || endpointExtension || "").trim();
+        const extensionFallback = requestType === "register" ? endpointExtension : "";
+        const extensionNumber = String(authResponse.extension || extensionFallback || "").trim();
         if (!extensionNumber) {
           await this.sendExtensionsAuthFailure(host, message, rinfo, { statusCode: 403, reasonPhrase: "Missing Extension" });
           return;
         }
-        const contact = parseContactHeader(getSipHeader(message, "contact"));
-        const expires = this.resolveRegisterExpires(message, contact.parameters);
-        if (expires <= 0) {
-          this.extensionService.unregisterEndpoint(candidate.ref, extensionNumber, {
-            contactUri: contact.uri,
-            sourceIp: rinfo.address,
-            sourcePort: rinfo.port,
-          });
+        if (requestType === "register") {
+          await this.completeExtensionsRegister(candidate, message, rinfo, extensionNumber);
         } else {
-          this.extensionService.registerEndpoint({
-            ref: candidate.ref,
-            extensionNumber,
-            contactUri: contact.uri,
-            sourceIp: rinfo.address,
-            sourcePort: rinfo.port,
-            expiresAt: Date.now() + (expires * 1000),
-          });
+          await this.startInboundExtensionInvite(candidate, message, rinfo, extensionNumber);
         }
-        await this.sendStatelessResponse(candidate.socket, message, rinfo, 200, "OK", candidate.advertisedIp, candidate.bindPort, {
-          Contact: contact.uri ? `<${contact.uri}>;expires=${Math.max(0, expires)}` : undefined,
-        });
         return;
       }
       if (fallbackRejectResponse) {
@@ -1188,61 +1258,33 @@ export class SipTransportService {
     }
   }
 
-  private async handleExtensionsInvite(host: ExtensionsHost, message: SipMessage, rinfo: dgram.RemoteInfo): Promise<void> {
-    if (await this.replayServerTransaction(host.socket, message, rinfo)) {
-      return;
+  private async completeExtensionsRegister(
+    candidate: ExtensionsHost,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    extensionNumber: string,
+  ): Promise<void> {
+    const contact = parseContactHeader(getSipHeader(message, "contact"));
+    const expires = this.resolveRegisterExpires(message, contact.parameters);
+    if (expires <= 0) {
+      this.extensionService.unregisterEndpoint(candidate.ref, extensionNumber, {
+        contactUri: contact.uri,
+        sourceIp: rinfo.address,
+        sourcePort: rinfo.port,
+      });
+    } else {
+      this.extensionService.registerEndpoint({
+        ref: candidate.ref,
+        extensionNumber,
+        contactUri: contact.uri,
+        sourceIp: rinfo.address,
+        sourcePort: rinfo.port,
+        expiresAt: Date.now() + (expires * 1000),
+      });
     }
-    const transactionKey = this.beginServerTransaction(message);
-    try {
-      const endpointExtension = this.extractEndpointExtension(message);
-      const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
-      let fallbackRejectResponse: ExtensionsAuthResolution | null = null;
-      for (const candidate of this.listExtensionsHostsForListener(host)) {
-        const authResponse = await this.resolveExtensionsAuth(candidate, message, "invite", endpointExtension, authorization, rinfo);
-        if (authResponse.notApplicable) {
-          continue;
-        }
-        if (!authResponse.allow) {
-          if (this.shouldContinueExtensionsTraversalOnAuthReject(candidate, authResponse)) {
-            fallbackRejectResponse = authResponse;
-            continue;
-          }
-          await this.sendExtensionsAuthFailure(host, message, rinfo, authResponse);
-          return;
-        }
-        const authenticatedExtensionNumber = String(authResponse.extension || "").trim();
-        if (!authenticatedExtensionNumber) {
-          await this.sendExtensionsAuthFailure(host, message, rinfo, { statusCode: 403, reasonPhrase: "Missing Extension" });
-          return;
-        }
-        const contact = parseContactHeader(getSipHeader(message, "contact"));
-        const invite = this.createInboundInvite(
-          candidate.ref,
-          candidate.publicRef || candidate.ref,
-          message,
-          "sip",
-          authenticatedExtensionNumber,
-          this.extensionService.resolveEndpointIdForTriggerLeg(candidate.ref, authenticatedExtensionNumber, {
-            contactUri: contact.uri,
-            sourceIp: rinfo.address,
-            sourcePort: rinfo.port,
-          }),
-        );
-        const result = this.extensionService.emitInboundInvite(invite);
-        this.prepareInboundRtpSession(result.legId, candidate.bindIp, candidate.advertisedIp, message, rinfo);
-        this.inboundSessions.set(result.legId, this.createInboundSession(candidate.socket, result.legId, message, rinfo, candidate.advertisedIp, candidate.bindPort));
-        await this.sendStatelessResponse(candidate.socket, message, rinfo, 100, "Trying", candidate.advertisedIp, candidate.bindPort);
-        return;
-      }
-      if (fallbackRejectResponse) {
-        await this.sendExtensionsAuthFailure(host, message, rinfo, fallbackRejectResponse);
-        return;
-      }
-      await this.sendStatelessResponse(host.socket, message, rinfo, 404, "Not Found", host.advertisedIp, host.bindPort);
-    } catch (error) {
-      this.clearServerTransaction(transactionKey);
-      throw error;
-    }
+    await this.sendStatelessResponse(candidate.socket, message, rinfo, 200, "OK", candidate.advertisedIp, candidate.bindPort, {
+      Contact: contact.uri ? `<${contact.uri}>;expires=${Math.max(0, expires)}` : undefined,
+    });
   }
 
   private async handleOutboundPacket(session: OutboundSipSession, rawMessage: Buffer, rinfo: dgram.RemoteInfo): Promise<void> {
@@ -1333,7 +1375,7 @@ export class SipTransportService {
           requestUri: session.requestUri,
           remoteAddress: rinfo.address,
           remotePort: rinfo.port,
-          viaHost: session.contactUri.replace(/^sip:[^@]+@/, ""),
+          viaHost: this.viaHostFromContactUri(session.contactUri),
           from: session.from,
           to: session.to,
           callId: session.callId,
@@ -1348,16 +1390,13 @@ export class SipTransportService {
         return;
       }
       if (cseq.method !== "INVITE") {
-        if (cseq.method === "CANCEL") {
-          return;
-        }
         return;
       }
       try {
         await this.sendOutboundInviteAck(session, message, rinfo);
       } catch (error) {
         console.error(
-          `[sip-pbx:signaling] outbound INVITE ACK failed; leg=${session.legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+          `[sip-pbx:signaling] outbound INVITE ACK failed; leg=${session.legId}; error=${this.errorMessage(error)}`,
         );
       }
       const sessionState = session.state;
@@ -1380,23 +1419,7 @@ export class SipTransportService {
           session.authorizationHeaderName = authHeaderName;
           session.authAttempts += 1;
           await this.sendOutboundInvite(session, {
-            onTimeout: () => {
-              if (!this.outboundSessions.has(session.legId)) {
-                return;
-              }
-              this.clearTransactionsForCallId(session.callId);
-              this.outboundSessions.delete(session.legId);
-              try {
-                if (session.ownsSocket) {
-                  session.socket.close();
-                }
-              } catch (error) {
-                console.error(
-                  `[sip-pbx:signaling] outbound auth retry socket close failed on timeout; leg=${session.legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
-                );
-              }
-              this.onAttemptRejected(session.legId, "transaction_timeout");
-            },
+            onTimeout: () => this.handleOutboundInviteTimeout(session, "transaction_timeout"),
           });
           return;
         }
@@ -1540,23 +1563,15 @@ export class SipTransportService {
     }
   }
 
-  private async sendTrunkRegister(host: TrunkHost, options?: {
-    expiresSeconds?: number;
-  }): Promise<void> {
-    await this.sendTrunkRegisterRequest(host, null, options);
-  }
-
-  private async sendTrunkRegisterRequest(
+  private async sendTrunkRegister(
     host: TrunkHost,
-    challengeInput: {
+    challengeInput?: {
       challenge: SipDigestAuthorization | null;
       headerName: "authorization" | "proxy-authorization";
       remoteAddress: string;
       remotePort: number;
     } | null,
-    options?: {
-      expiresSeconds?: number;
-    },
+    options?: { expiresSeconds?: number },
   ): Promise<void> {
     const server = String(host.credentials.proxyServer || host.credentials.sipServer || "").trim();
     if (!server) {
@@ -1565,7 +1580,7 @@ export class SipTransportService {
     const username = String(host.credentials.username || "n8n").trim() || "n8n";
     const password = String(host.credentials.password || "");
     const remotePort = Number(host.credentials.port || OPTION_DEFAULTS.sip.port);
-    const domain = String(host.credentials.publicDomain || host.credentials.realm || host.credentials.sipServer || server);
+    const domain = String(host.credentials.publicDomain || host.credentials.sipServer || server);
     const registration = host.registration;
     const expiresSeconds = Math.max(0, Number(options?.expiresSeconds ?? host.registrationExpires) || 0);
     const localHost = registration?.localHost || normalizeSipAdvertisedHost(host.credentials.publicDomain, host.bindIp);
@@ -1646,6 +1661,10 @@ export class SipTransportService {
     if (cseq.method !== "REGISTER") {
       return false;
     }
+    const callId = String(getSipHeader(message, "call-id") || "").trim();
+    if (!host.registerMode || !host.registration || !callId || host.registration.callId !== callId) {
+      return false;
+    }
     const statusCode = Number(message.statusCode || 0);
     if (statusCode >= 200 && statusCode < 300) {
       const contact = parseContactHeader(getSipHeader(message, "contact"));
@@ -1684,7 +1703,7 @@ export class SipTransportService {
       this.scheduleTrunkRegistrationRetry(host, SIP_REGISTER_RETRY_DELAY_MS);
       return true;
     }
-    await this.sendTrunkRegisterRequest(host, {
+    await this.sendTrunkRegister(host, {
       challenge,
       headerName: authHeaderName,
       remoteAddress: rinfo.address,
@@ -1693,45 +1712,38 @@ export class SipTransportService {
     return true;
   }
 
-  private scheduleTrunkRegistrationRefresh(host: TrunkHost, expiresSeconds: number): void {
+  private scheduleTrunkRegistrationTask(host: TrunkHost, delayMs: number, label: string): void {
     this.clearTrunkRegistrationTimer(host);
-    const expiresMs = Math.max(1000, Math.floor(Number(expiresSeconds || 0) * 1000));
-    if (!Number.isFinite(expiresMs) || expiresMs <= 0 || !host.registerOnStart) {
+    if (!Number.isFinite(delayMs) || delayMs <= 0 || !host.registerMode) {
       return;
     }
-    const refreshMs = Math.max(250, Math.min(expiresMs - 250, Math.floor(expiresMs * 0.85)));
     host.registrationTimer = setTimeout(() => {
       host.registrationTimer = null;
-      if (!this.trunkHosts.has(host.ref) || !host.registerOnStart) {
+      if (!this.trunkHosts.has(host.ref) || !host.registerMode) {
         return;
       }
       void this.sendTrunkRegister(host).catch((error) => {
         console.error(
-          `[sip-pbx:signaling] trunk registration refresh failed; ref=${host.ref}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+          `[sip-pbx:signaling] trunk registration ${label} failed; ref=${host.ref}; error=${this.errorMessage(error)}`,
         );
       });
-    }, refreshMs > 0 ? refreshMs : expiresMs);
+    }, delayMs);
     (host.registrationTimer as unknown as { unref?: () => void }).unref?.();
   }
 
-  private scheduleTrunkRegistrationRetry(host: TrunkHost, delayMs: number): void {
-    this.clearTrunkRegistrationTimer(host);
-    const resolvedDelayMs = Math.max(250, Math.floor(Number(delayMs || SIP_REGISTER_RETRY_DELAY_MS)));
-    if (!Number.isFinite(resolvedDelayMs) || !host.registerOnStart) {
+  private scheduleTrunkRegistrationRefresh(host: TrunkHost, expiresSeconds: number): void {
+    const expiresMs = Math.max(1000, Math.floor(Number(expiresSeconds || 0) * 1000));
+    if (!Number.isFinite(expiresMs) || expiresMs <= 0) {
+      this.clearTrunkRegistrationTimer(host);
       return;
     }
-    host.registrationTimer = setTimeout(() => {
-      host.registrationTimer = null;
-      if (!this.trunkHosts.has(host.ref) || !host.registerOnStart) {
-        return;
-      }
-      void this.sendTrunkRegister(host).catch((error) => {
-        console.error(
-          `[sip-pbx:signaling] trunk registration retry failed; ref=${host.ref}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
-        );
-      });
-    }, resolvedDelayMs);
-    (host.registrationTimer as unknown as { unref?: () => void }).unref?.();
+    const refreshMs = Math.max(250, Math.min(expiresMs - 250, Math.floor(expiresMs * 0.85)));
+    this.scheduleTrunkRegistrationTask(host, refreshMs > 0 ? refreshMs : expiresMs, "refresh");
+  }
+
+  private scheduleTrunkRegistrationRetry(host: TrunkHost, delayMs: number): void {
+    const resolvedDelayMs = Math.max(250, Math.floor(Number(delayMs || SIP_REGISTER_RETRY_DELAY_MS)));
+    this.scheduleTrunkRegistrationTask(host, resolvedDelayMs, "retry");
   }
 
   private clearTrunkRegistrationTimer(host: TrunkHost): void {
@@ -1750,14 +1762,15 @@ export class SipTransportService {
     return fallbackMs;
   }
 
-  private verifyExtensionsDigestAuthorization(
-    host: ExtensionsHost,
+  private verifyHostDigestAuthorization(
+    host: SipHostBase,
+    scopeKey: string,
     message: SipMessage,
     authorization: ReturnType<typeof parseSipAuthorization>,
     username: string,
     password: string,
   ): { ok: true; stale: false; invalidNonce: false } | { ok: false; stale: boolean; invalidNonce: boolean } {
-    const nonceValidation = this.extensionsDigestNonces.validate(this.extensionNonceScope(host), host.realm, authorization);
+    const nonceValidation = this.extensionsDigestNonces.validate(scopeKey, host.realm, authorization);
     if (!nonceValidation.ok) {
       return { ok: false, stale: nonceValidation.stale, invalidNonce: true };
     }
@@ -1775,70 +1788,9 @@ export class SipTransportService {
     return { ok: true, stale: false, invalidNonce: false };
   }
 
-  private async resolveExtensionsAuth(
-    host: ExtensionsHost,
-    message: SipMessage,
-    requestType: "register" | "invite",
-    endpointExtension: string,
-    authorization: ReturnType<typeof parseSipAuthorization>,
-    rinfo: dgram.RemoteInfo,
-  ): Promise<ExtensionsAuthResolution> {
-    const method = String(message.method || "").toUpperCase();
-    const normalizedAuthorizationUsername = this.resolveNormalizedAuthorizationUsername(host, authorization);
-    if (authorization && host.authMode !== "raw" && !normalizedAuthorizationUsername.applicable) {
-      return { allow: false, notApplicable: true };
-    }
-    const username = authorization
-      ? normalizedAuthorizationUsername.username
-      : String(endpointExtension || "");
-    const publicAuthorizationState = this.resolvePublicExtensionsAuthorization(host, authorization);
-    const publicAuthorization = publicAuthorizationState.authorization || undefined;
-    const requestContext = {
-      requestType,
-      method,
-      username,
-      externalUsername: username,
-      endpointExtension,
-      realm: host.realm,
-      hasAuthorization: Boolean(authorization),
-      authorization: publicAuthorization,
-      sourceIp: String(rinfo.address || ""),
-      clientPort: Number(rinfo.port || 0),
-      transport: OPTION_DEFAULTS.sip.transport,
-      localIp: String(host.bindIp || ""),
-      localPort: Number(host.bindPort || 0),
-      raw: {
-        startLine: message.startLine,
-        method,
-        requestUri: String(message.requestUri || ""),
-        headers: Object.fromEntries(Object.entries(message.headers).map(([name, values]) => [name, values.join(", ")])),
-        body: message.body || "",
-      },
-    };
-    if (host.authMode === "static") {
-      return this.resolveStaticAuth(host, message, endpointExtension, authorization, normalizedAuthorizationUsername.username);
-    }
-    if (host.authMode === "digest-first" && !authorization) {
-      return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
-    }
-    const request = this.extensionService.createAuthRequest({
-      ref: host.ref,
-      publicRef: host.publicRef || host.ref,
-      requestContext,
-    });
-    const response = await this.authService.waitForResolution(request.authRequestId);
-    return this.applyInteractiveAuthResponse(
-      host,
-      message,
-      authorization,
-      response,
-      publicAuthorizationState.stale,
-      normalizedAuthorizationUsername.username,
-    );
-  }
-
-  private resolvePublicExtensionsAuthorization(
-    host: ExtensionsHost,
+  private resolvePublicHostAuthorization(
+    host: SipHostBase,
+    scopeKey: string,
     authorization: ReturnType<typeof parseSipAuthorization>,
   ): { authorization: ReturnType<typeof parseSipAuthorization> | null; stale: boolean } {
     if (!authorization || String(authorization.scheme || "").toLowerCase() !== "digest") {
@@ -1847,11 +1799,132 @@ export class SipTransportService {
     if (String(authorization.params?.realm || "").trim() !== String(host.realm || "").trim()) {
       return { authorization: null, stale: false };
     }
-    const nonceValidation = this.extensionsDigestNonces.validate(this.extensionNonceScope(host), host.realm, authorization);
+    const nonceValidation = this.extensionsDigestNonces.validate(scopeKey, host.realm, authorization);
     if (!nonceValidation.ok) {
       return { authorization: null, stale: nonceValidation.stale === true };
     }
     return { authorization, stale: false };
+  }
+
+  private resolveHostChallengeStale(
+    host: SipHostBase,
+    scopeKey: string,
+    authorization: ReturnType<typeof parseSipAuthorization>,
+    prevalidatedAuthorizationStale = false,
+  ): boolean {
+    if (prevalidatedAuthorizationStale) {
+      return true;
+    }
+    if (!authorization) {
+      return false;
+    }
+    const nonceValidation = this.extensionsDigestNonces.validate(scopeKey, host.realm, authorization);
+    return !nonceValidation.ok && nonceValidation.stale === true;
+  }
+
+  private async sendHostAuthFailure(
+    host: SipHostBase,
+    scopeKey: string,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    response: { statusCode?: number; reasonPhrase?: string; stale?: boolean; challenge?: boolean },
+  ): Promise<void> {
+    const statusCode = Number(response.statusCode || 401);
+    const challengeNonce = response.challenge === true && (statusCode === 401 || statusCode === 407)
+      ? this.extensionsDigestNonces.issue(scopeKey, host.realm)
+      : null;
+    await this.sendStatelessResponse(host.socket, message, rinfo, statusCode, String(response.reasonPhrase || "Unauthorized"), host.advertisedIp, host.bindPort, {
+      "WWW-Authenticate": challengeNonce ? buildSipDigestChallenge(host.realm, challengeNonce, { stale: Boolean(response.stale) }) : undefined,
+    });
+  }
+
+  private buildAuthRequestContext(input: {
+    host: SipHostBase;
+    message: SipMessage;
+    requestType: SipAuthRequestKind;
+    username: string;
+    endpointExtension: string;
+    publicAuthorization: ReturnType<typeof parseSipAuthorization> | null;
+    authorization: ReturnType<typeof parseSipAuthorization>;
+    rinfo: dgram.RemoteInfo;
+  }) {
+    const method = String(input.message.method || "").toUpperCase();
+    return {
+      requestType: input.requestType,
+      method,
+      username: input.username,
+      externalUsername: input.username,
+      endpointExtension: input.endpointExtension,
+      realm: input.host.realm,
+      hasAuthorization: Boolean(input.authorization),
+      authorization: input.publicAuthorization || undefined,
+      sourceIp: String(input.rinfo.address || ""),
+      clientPort: Number(input.rinfo.port || 0),
+      transport: OPTION_DEFAULTS.sip.transport,
+      localIp: String(input.host.bindIp || ""),
+      localPort: Number(input.host.bindPort || 0),
+      raw: {
+        startLine: input.message.startLine,
+        method,
+        requestUri: String(input.message.requestUri || ""),
+        headers: Object.fromEntries(Object.entries(input.message.headers).map(([name, values]) => [name, values.join(", ")])),
+        body: input.message.body || "",
+      },
+    };
+  }
+
+  private async resolveExtensionsAuth(
+    host: ExtensionsHost,
+    message: SipMessage,
+    requestType: SipAuthRequestKind,
+    endpointExtension: string,
+    authorization: ReturnType<typeof parseSipAuthorization>,
+    rinfo: dgram.RemoteInfo,
+  ): Promise<SipAuthOutcome> {
+    const scopeKey = this.extensionNonceScope(host);
+    const normalizedAuthorizationUsername = this.resolveNormalizedAuthorizationUsername(host, authorization);
+    if (authorization && host.authMode !== "raw" && !normalizedAuthorizationUsername.applicable) {
+      return { allow: false, notApplicable: true };
+    }
+    const username = authorization
+      ? normalizedAuthorizationUsername.username
+      : String(endpointExtension || "");
+    const publicAuthorizationState = this.resolvePublicHostAuthorization(host, scopeKey, authorization);
+    if (host.authMode === "static") {
+      return this.resolveStaticAuth(host, message, endpointExtension, authorization, normalizedAuthorizationUsername.username);
+    }
+    if (host.authMode === "digest-first" && !authorization) {
+      return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
+    }
+    const requestContext = this.buildAuthRequestContext({
+      host,
+      message,
+      requestType,
+      username,
+      endpointExtension,
+      publicAuthorization: publicAuthorizationState.authorization,
+      authorization,
+      rinfo,
+    });
+    const request = this.extensionService.createAuthRequest({
+      ref: host.ref,
+      publicRef: host.publicRef || host.ref,
+      requestContext,
+    });
+    const response = await this.authService.waitForResolution(request.authRequestId);
+    return this.applyInteractiveAuthResponse(
+      host,
+      scopeKey,
+      message,
+      authorization,
+      response,
+      {
+        verifyUsername: String((authorization && authorization.params?.username) || "").trim() || normalizedAuthorizationUsername.username,
+        extensionFallback: normalizedAuthorizationUsername.username,
+        requiresExtension: true,
+        prevalidatedStale: publicAuthorizationState.stale,
+      },
+    );
   }
 
   private resolveNormalizedAuthorizationUsername(
@@ -1882,7 +1955,7 @@ export class SipTransportService {
     endpointExtension: string,
     authorization: ReturnType<typeof parseSipAuthorization>,
     normalizedAuthorizationUsername: string,
-  ): ExtensionsAuthResolution {
+  ): SipAuthOutcome {
     if (!authorization) {
       return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
     }
@@ -1892,8 +1965,9 @@ export class SipTransportService {
     if (!credential) {
       return { allow: false, notApplicable: true };
     }
-    const verified = this.verifyExtensionsDigestAuthorization(
+    const verified = this.verifyHostDigestAuthorization(
       host,
+      this.extensionNonceScope(host),
       message,
       authorization,
       verificationUsername || credential.username || username,
@@ -1908,40 +1982,40 @@ export class SipTransportService {
   }
 
   private applyInteractiveAuthResponse(
-    host: ExtensionsHost,
+    host: SipHostBase,
+    scopeKey: string,
     message: SipMessage,
     authorization: ReturnType<typeof parseSipAuthorization>,
     response: SipInteractiveAuthDecision,
-    prevalidatedAuthorizationStale = false,
-    normalizedAuthorizationUsername = "",
-  ): ExtensionsAuthResolution {
-    if (response.action === "allow") {
-      const extension = String(response.extension || normalizedAuthorizationUsername || "").trim();
+    options: {
+      verifyUsername: string;
+      extensionFallback?: string;
+      requiresExtension?: boolean;
+      prevalidatedStale?: boolean;
+    },
+  ): SipAuthOutcome {
+    const extensionFallback = String(options.extensionFallback || "").trim();
+    const resolveExtension = (): SipAuthOutcome => {
+      if (!options.requiresExtension) {
+        return { allow: true };
+      }
+      const extension = String(response.extension || extensionFallback || "").trim();
       if (!extension) {
         return { allow: false, statusCode: 403, reasonPhrase: "Missing Extension" };
       }
       return { allow: true, extension };
+    };
+    if (response.action === "allow") {
+      return resolveExtension();
     }
     if (response.action === "verify_password") {
       if (!authorization) {
         return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
       }
-      const username = String(normalizedAuthorizationUsername || "").trim();
-      const verificationUsername = String((authorization.params?.username) || "").trim();
       const password = String(response.password || "");
-      const verified = this.verifyExtensionsDigestAuthorization(
-        host,
-        message,
-        authorization,
-        verificationUsername || username,
-        password,
-      );
+      const verified = this.verifyHostDigestAuthorization(host, scopeKey, message, authorization, options.verifyUsername, password);
       if (verified.ok) {
-        const extension = String(response.extension || username || "").trim();
-        if (!extension) {
-          return { allow: false, statusCode: 403, reasonPhrase: "Missing Extension" };
-        }
-        return { allow: true, extension };
+        return resolveExtension();
       }
       return verified.invalidNonce
         ? { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", stale: verified.stale, challenge: true }
@@ -1963,29 +2037,14 @@ export class SipTransportService {
       reasonPhrase: "Unauthorized",
       challenge: response.action === "challenge",
       stale: response.action === "challenge"
-        ? this.resolveInteractiveChallengeStale(host, authorization, prevalidatedAuthorizationStale)
+        ? this.resolveHostChallengeStale(host, scopeKey, authorization, options.prevalidatedStale)
         : false,
     };
   }
 
-  private resolveInteractiveChallengeStale(
-    host: ExtensionsHost,
-    authorization: ReturnType<typeof parseSipAuthorization>,
-    prevalidatedAuthorizationStale = false,
-  ): boolean {
-    if (prevalidatedAuthorizationStale) {
-      return true;
-    }
-    if (!authorization) {
-      return false;
-    }
-    const nonceValidation = this.extensionsDigestNonces.validate(this.extensionNonceScope(host), host.realm, authorization);
-    return !nonceValidation.ok && nonceValidation.stale === true;
-  }
-
   private shouldContinueExtensionsTraversalOnAuthReject(
     host: ExtensionsHost,
-    response: ExtensionsAuthResolution,
+    response: SipAuthOutcome,
   ): boolean {
     return host.continueTraversalOnAuthReject === true
       && !response.allow
@@ -1993,19 +2052,32 @@ export class SipTransportService {
       && response.challenge !== true;
   }
 
-  private async sendExtensionsAuthFailure(
+  private sendExtensionsAuthFailure(
     host: ExtensionsHost,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
     response: { statusCode?: number; reasonPhrase?: string; stale?: boolean; challenge?: boolean },
   ): Promise<void> {
-    const statusCode = Number(response.statusCode || 401);
-    const challengeNonce = response.challenge === true && (statusCode === 401 || statusCode === 407)
-      ? this.extensionsDigestNonces.issue(this.extensionNonceScope(host), host.realm)
-      : null;
-    await this.sendStatelessResponse(host.socket, message, rinfo, statusCode, String(response.reasonPhrase || "Unauthorized"), host.advertisedIp, host.bindPort, {
-      "WWW-Authenticate": challengeNonce ? buildSipDigestChallenge(host.realm, challengeNonce, { stale: Boolean(response.stale) }) : undefined,
-    });
+    return this.sendHostAuthFailure(host, this.extensionNonceScope(host), message, rinfo, response);
+  }
+
+  private sendTrunkAuthFailure(
+    host: TrunkHost,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    response: { statusCode?: number; reasonPhrase?: string; stale?: boolean; challenge?: boolean },
+  ): Promise<void> {
+    return this.sendHostAuthFailure(host, this.trunkNonceScope(host), message, rinfo, response);
+  }
+
+  private shouldContinueTrunkTraversalOnAuthReject(
+    host: TrunkHost,
+    response: SipAuthOutcome,
+  ): boolean {
+    return host.continueTraversalOnAuthReject === true
+      && !response.allow
+      && !response.notApplicable
+      && response.challenge !== true;
   }
 
   private async sendNotImplementedResponse(
@@ -2014,7 +2086,6 @@ export class SipTransportService {
     rinfo: dgram.RemoteInfo,
     advertisedHost: string,
     bindPort: number,
-    allowMethods: string[],
   ): Promise<void> {
     if (await this.replayServerTransaction(socket, message, rinfo)) {
       return;
@@ -2022,7 +2093,7 @@ export class SipTransportService {
     const transactionKey = this.beginServerTransaction(message);
     try {
       await this.sendStatelessResponse(socket, message, rinfo, 501, "Not Implemented", advertisedHost, bindPort, {
-        Allow: allowMethods.join(", "),
+        Allow: SIP_ALLOWED_METHODS.join(", "),
       });
     } catch (error) {
       this.clearServerTransaction(transactionKey);
@@ -2057,6 +2128,68 @@ export class SipTransportService {
     const callId = getSipHeader(message, "call-id");
     const details = error instanceof Error ? (error.stack || error.message) : String(error);
     console.error(`[sip-transport:${scope}] ${method || "response"} handler failed${callId ? ` call-id=${callId}` : ""}: ${details}`);
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error || "unknown");
+  }
+
+  private async processInboundServerTransaction(
+    socket: dgram.Socket,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    callback: () => Promise<void>,
+  ): Promise<boolean> {
+    if (await this.replayServerTransaction(socket, message, rinfo)) {
+      return true;
+    }
+    const transactionKey = this.beginServerTransaction(message);
+    try {
+      await callback();
+      return true;
+    } catch (error) {
+      this.clearServerTransaction(transactionKey);
+      throw error;
+    }
+  }
+
+  private async startInboundTrunkInvite(host: TrunkHost, message: SipMessage, rinfo: dgram.RemoteInfo): Promise<void> {
+    const invite = this.createInboundInvite(host.ref, host.publicRef || host.ref, message, "sip");
+    const result = this.trunkService.emitInboundInvite(invite);
+    this.prepareInboundRtpSession(result.legId, host.bindIp, host.advertisedIp, message, rinfo);
+    this.inboundSessions.set(
+      result.legId,
+      this.createInboundSession(host.socket, result.legId, message, rinfo, host.advertisedIp, host.bindPort),
+    );
+    await this.sendStatelessResponse(host.socket, message, rinfo, 100, "Trying", host.advertisedIp, host.bindPort);
+  }
+
+  private async startInboundExtensionInvite(
+    host: ExtensionsHost,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    authenticatedExtensionNumber: string,
+  ): Promise<void> {
+    const contact = parseContactHeader(getSipHeader(message, "contact"));
+    const invite = this.createInboundInvite(
+      host.ref,
+      host.publicRef || host.ref,
+      message,
+      "sip",
+      authenticatedExtensionNumber,
+      this.extensionService.resolveEndpointIdForTriggerLeg(host.ref, authenticatedExtensionNumber, {
+        contactUri: contact.uri,
+        sourceIp: rinfo.address,
+        sourcePort: rinfo.port,
+      }),
+    );
+    const result = this.extensionService.emitInboundInvite(invite);
+    this.prepareInboundRtpSession(result.legId, host.bindIp, host.advertisedIp, message, rinfo);
+    this.inboundSessions.set(
+      result.legId,
+      this.createInboundSession(host.socket, result.legId, message, rinfo, host.advertisedIp, host.bindPort),
+    );
+    await this.sendStatelessResponse(host.socket, message, rinfo, 100, "Trying", host.advertisedIp, host.bindPort);
   }
 
   private createInboundInvite(
@@ -2451,7 +2584,7 @@ export class SipTransportService {
       }
       void sendUdp(live.socket, live.inviteSuccessResponse, live.remotePort, live.remoteAddress).catch((error) => {
         console.error(
-          `[sip-pbx:signaling] inbound 200 OK retransmit failed; leg=${live.legId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+          `[sip-pbx:signaling] inbound 200 OK retransmit failed; leg=${live.legId}; error=${this.errorMessage(error)}`,
         );
       });
       live.inviteSuccessIntervalMs = Math.min(live.inviteSuccessIntervalMs * 2, SIP_T2_MS);
@@ -2504,6 +2637,7 @@ export class SipTransportService {
     headers: SipHeaderEntry[];
   } | null> {
     const headers = this.normalizeHeaderEntries(dial.metadata.customSipHeaders);
+    const destinationUser = normalizeDialDestinationUser(target.kind === "opaque" ? target.value : target.extensionNumber);
     if (dial.mode === "extension") {
       const extensionTarget: ExtensionDialTarget = target.kind === "extension"
         ? target
@@ -2551,7 +2685,6 @@ export class SipTransportService {
       : ((dial.metadata.sipCredentials && typeof dial.metadata.sipCredentials === "object")
         ? (dial.metadata.sipCredentials as Record<string, unknown>)
         : {});
-    const destinationUser = normalizeDialDestinationUser(target.kind === "opaque" ? target.value : target.extensionNumber);
     const remoteAddress = String(credentials.proxyServer || credentials.sipServer || "").trim();
     if (!remoteAddress) {
       return null;
@@ -2610,14 +2743,145 @@ export class SipTransportService {
     return Boolean(requestUri && requestUri.parameters["n8n-route"] === host.routeToken);
   }
 
+  private trunkNonceScope(host: TrunkHost): string {
+    return `trunk:${host.bindIp}:${host.bindPort}`;
+  }
+
   private extensionNonceScope(host: ExtensionsHost): string {
     return `${host.bindIp}:${host.bindPort}`;
   }
 
-  private listExtensionsHostsForListener(host: ExtensionsHost): ExtensionsHost[] {
-    return Array.from(this.extensionsHosts.values())
-      .filter((candidate) => candidate.socket === host.socket)
-      .sort((left, right) => String(left.publicRef || left.ref).localeCompare(String(right.publicRef || right.ref)));
+  private listHostsForEndpoint<H extends SipHostBase>(map: Map<string, H>, bindIp: string, bindPort: number): H[] {
+    return Array.from(map.values())
+      .filter((candidate) => candidate.bindIp === bindIp && candidate.bindPort === bindPort)
+      .sort((left, right) => {
+        const byPublicRef = String(left.publicRef || left.ref).localeCompare(String(right.publicRef || right.ref));
+        return byPublicRef !== 0 ? byPublicRef : String(left.ref).localeCompare(String(right.ref));
+      });
+  }
+
+  private listExtensionsHostsForEndpoint(bindIp: string, bindPort: number): ExtensionsHost[] {
+    return this.listHostsForEndpoint(this.extensionsHosts, bindIp, bindPort);
+  }
+
+  private listTrunkHostsForEndpoint(bindIp: string, bindPort: number): TrunkHost[] {
+    return this.listHostsForEndpoint(this.trunkHosts, bindIp, bindPort);
+  }
+
+  private extractTrunkRequestUser(message: SipMessage): string {
+    const requestUser = String(parseSipUri(String(message.requestUri || ""))?.user || "").trim();
+    if (requestUser) {
+      return requestUser;
+    }
+    const toUser = String(parseSipUri(parseSipNameAddress(getSipHeader(message, "to")).uri || "")?.user || "").trim();
+    if (toUser) {
+      return toUser;
+    }
+    return String(parseSipUri(parseSipNameAddress(getSipHeader(message, "from")).uri || "")?.user || "").trim();
+  }
+
+  private async resolveTrunkAuth(
+    host: TrunkHost,
+    message: SipMessage,
+    requestType: SipAuthRequestKind,
+    authorization: ReturnType<typeof parseSipAuthorization>,
+    rinfo: dgram.RemoteInfo,
+  ): Promise<SipAuthOutcome> {
+    if (host.registerMode) {
+      return { allow: false, notApplicable: true };
+    }
+    const scopeKey = this.trunkNonceScope(host);
+    const publicAuthorizationState = this.resolvePublicHostAuthorization(host, scopeKey, authorization);
+    const username = String((authorization && authorization.params?.username) || this.extractTrunkRequestUser(message) || "").trim();
+    const requestContext = this.buildAuthRequestContext({
+      host,
+      message,
+      requestType,
+      username,
+      endpointExtension: "",
+      publicAuthorization: publicAuthorizationState.authorization,
+      authorization,
+      rinfo,
+    });
+    const request = this.trunkAuthBridge.createRequest({
+      ref: host.ref,
+      publicRef: host.publicRef || host.ref,
+      requestContext,
+      timeout: host.authTimeoutMs,
+    });
+    const response = await this.authService.waitForResolution(request.authRequestId);
+    return this.applyInteractiveAuthResponse(
+      host,
+      scopeKey,
+      message,
+      authorization,
+      response,
+      {
+        verifyUsername: String(authorization?.params?.username || this.extractTrunkRequestUser(message) || "").trim(),
+        prevalidatedStale: publicAuthorizationState.stale,
+      },
+    );
+  }
+
+  private async handleDirectInboundTrunkByEndpoint(
+    bindIp: string,
+    bindPort: number,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+    requestType: SipAuthRequestKind,
+  ): Promise<boolean> {
+    const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
+    let fallbackRejectResponse: SipAuthOutcome | null = null;
+    let fallbackRejectHost: TrunkHost | null = null;
+    for (const candidate of this.listTrunkHostsForEndpoint(bindIp, bindPort)) {
+      const authResponse = await this.resolveTrunkAuth(candidate, message, requestType, authorization, rinfo);
+      if (authResponse.notApplicable) {
+        continue;
+      }
+      if (!authResponse.allow) {
+        if (this.shouldContinueTrunkTraversalOnAuthReject(candidate, authResponse)) {
+          fallbackRejectResponse = authResponse;
+          fallbackRejectHost = candidate;
+          continue;
+        }
+        return await this.processInboundServerTransaction(candidate.socket, message, rinfo, async () => {
+          await this.sendTrunkAuthFailure(candidate, message, rinfo, authResponse);
+        });
+      }
+      return await this.processInboundServerTransaction(candidate.socket, message, rinfo, async () => {
+        if (requestType === "register") {
+          const contact = parseContactHeader(getSipHeader(message, "contact"));
+          const expires = this.resolveRegisterExpires(message, contact.parameters);
+          await this.sendStatelessResponse(candidate.socket, message, rinfo, 200, "OK", candidate.advertisedIp, candidate.bindPort, {
+            Contact: contact.uri ? `<${contact.uri}>;expires=${Math.max(0, expires)}` : undefined,
+          });
+        } else {
+          await this.startInboundTrunkInvite(candidate, message, rinfo);
+        }
+      });
+    }
+    if (fallbackRejectResponse && fallbackRejectHost) {
+      return await this.processInboundServerTransaction(fallbackRejectHost.socket, message, rinfo, async () => {
+        await this.sendTrunkAuthFailure(fallbackRejectHost, message, rinfo, fallbackRejectResponse);
+      });
+    }
+    return false;
+  }
+
+  private async handleOrderedTrunkInviteByEndpoint(
+    bindIp: string,
+    bindPort: number,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+  ): Promise<boolean> {
+    const candidates = this.listTrunkHostsForEndpoint(bindIp, bindPort);
+    const routeMatched = candidates.find((candidate) => candidate.registerMode && this.hasValidTrunkRouteToken(candidate, message)) || null;
+    if (routeMatched) {
+      return await this.processInboundServerTransaction(routeMatched.socket, message, rinfo, async () => {
+        await this.startInboundTrunkInvite(routeMatched, message, rinfo);
+      });
+    }
+    return await this.handleDirectInboundTrunkByEndpoint(bindIp, bindPort, message, rinfo, "invite");
   }
 
   private resolveRegisterExpires(message: SipMessage, contactParameters: Record<string, string>): number {
@@ -2652,6 +2916,10 @@ export class SipTransportService {
       return value;
     }
     return `${value};tag=${tag}`;
+  }
+
+  private viaHostFromContactUri(contactUri: string): string {
+    return contactUri.replace(/^sip:[^@]+@/, "");
   }
 
   private buildTransactionKey(message: SipMessage): string {
@@ -2739,7 +3007,7 @@ export class SipTransportService {
         transaction.onTimeout?.();
       } catch (error) {
         console.error(
-          `[sip-pbx:signaling] outbound transaction timeout callback failed; key=${transaction.key}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+          `[sip-pbx:signaling] outbound transaction timeout callback failed; key=${transaction.key}; error=${this.errorMessage(error)}`,
         );
       }
     }, SIP_TRANSACTION_LIFETIME_MS);
@@ -2768,7 +3036,7 @@ export class SipTransportService {
       }
       void sendUdp(live.socket, live.request, live.remotePort, live.remoteAddress).catch((error) => {
         console.error(
-          `[sip-pbx:signaling] outbound transaction retransmit failed; key=${live.key}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+          `[sip-pbx:signaling] outbound transaction retransmit failed; key=${live.key}; error=${this.errorMessage(error)}`,
         );
       });
       if (live.isInvite) {
@@ -2811,7 +3079,7 @@ export class SipTransportService {
       transaction.onFinal?.();
     } catch (error) {
       console.error(
-        `[sip-pbx:signaling] outbound transaction final callback failed; key=${transaction.key}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
+        `[sip-pbx:signaling] outbound transaction final callback failed; key=${transaction.key}; error=${this.errorMessage(error)}`,
       );
     }
     this.clearOutboundTransaction(key);

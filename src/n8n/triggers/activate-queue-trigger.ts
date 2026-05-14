@@ -40,6 +40,9 @@ export async function activateQueueTrigger(node: any, runtime: PbxRuntime): Prom
         outputs[requireBranchIndex(QueueTriggerBranches, QueueTriggerBranchPlaced)].push(buildTriggerItem({
           ref: refValue,
           legId,
+          callerNumber: String(payload.callerNumber || ""),
+          callerName: String(payload.callerName || ""),
+          trunkRef: String(payload.trunkRef || ""),
         }, { ref: refValue, legId: legId || undefined }));
       } else if (branchName === QueueTriggerBranchDispatch) {
         const rawLegId = typeof payload.legId === "string" ? String(payload.legId).trim() : "";
@@ -64,6 +67,9 @@ export async function activateQueueTrigger(node: any, runtime: PbxRuntime): Prom
         const itemPayload: Record<string, unknown> = {
           ref: refValue,
           mode: String(payload.mode || ""),
+          callerNumber: String(payload.callerNumber || ""),
+          callerName: String(payload.callerName || ""),
+          trunkRef: String(payload.trunkRef || ""),
         };
         if (rawLegId) {
           itemPayload.legId = rawLegId;

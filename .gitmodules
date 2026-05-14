@@ -13,3 +13,6 @@
 [submodule "vendor/libopus"]
 	path = vendor/libopus
 	url = https://github.com/xiph/opus.git
+[submodule "wiki"]
+	path = wiki
+	url = https://github.com/siptg/n8n-nodes-sip-pbx.wiki.git

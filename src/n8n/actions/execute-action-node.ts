@@ -3,6 +3,7 @@ import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { normalizeStringList } from "../../shared/string-utils";
 import {
   buildCallWaitStaticTail,
+  DialMakeBranches,
   buildDialWaitBranchOrder,
   CallWaitBranchDtmfFallback,
   CallWaitBranchEnded,
@@ -89,6 +90,7 @@ import {
   executeRespondToAuth,
   executeRespondToRecord,
 } from "./respond-actions";
+import { executeStartGlobalRecording } from "./recording-actions";
 import { requireActionValue } from "../shared/input-normalization";
 import type { PbxMetadata } from "../shared/pbx-payload-context";
 
@@ -151,44 +153,46 @@ function readOperation(node: any, index: number): string {
   throw new Error("Operation is required");
 }
 
-function resolvePlanGroup(operation: string): "call" | "dial" | "ai" | "media" | "respond" | "queue" {
+function resolvePlanGroup(operation: string): "call" | "dial" | "ai" | "media" | "respond" | "queue" | "recording" {
   switch (operation) {
     case "call.ringing":
     case "call.answer":
     case "call.hangup":
     case "call.bridge":
     case "call.unbridge":
-    case "call.waitCallEvent":
-    case "call.controlRecording":
+    case "call.wait":
       return "call";
     case "ai.invokeAiTool":
     case "ai.attachVoiceAgent":
       return "ai";
     case "dial.make":
     case "dial.break":
-    case "dial.waitDialEvent":
+    case "dial.wait":
       return "dial";
     case "media.playAudio":
     case "media.playTone":
     case "media.recordAudio":
     case "media.stopMedia":
-    case "media.waitMedia":
+    case "media.wait":
     case "media.sendDtmf":
       return "media";
-    case "respond.respondToRecord":
-    case "respond.respondToAuth":
-    case "respond.respondToAiTool":
+    case "respond.toRecord":
+    case "respond.toAuth":
+    case "respond.toAiTool":
       return "respond";
-    case "queue.enqueueLeg":
-    case "queue.setQueueCallback":
-    case "queue.getQueueStats":
+    case "queue.putLeg":
+    case "queue.setCallback":
+    case "queue.getStats":
       return "queue";
+    case "recording.control":
+    case "recording.start":
+      return "recording";
     default:
       throw new Error(`Unsupported operation: ${operation}`);
   }
 }
 
-function resolveExecutionGroup(context: ItemExecutionContext): "call" | "dial" | "ai" | "media" | "respond" | "queue" {
+function resolveExecutionGroup(context: ItemExecutionContext): "call" | "dial" | "ai" | "media" | "respond" | "queue" | "recording" {
   return resolvePlanGroup(context.operation);
 }
 
@@ -234,6 +238,15 @@ function resultDefined(result: Record<string, unknown>, key: string): boolean {
 function normalizeWaitEventOutputs(node: any, index: number): string[] {
   const raw = readNodeParameter(node, "waitEventOutputs", index, [...OPTION_DEFAULTS.dial.waitEventOutputs]);
   return Array.isArray(raw) ? normalizeStringList(raw) : [];
+}
+
+function isExtensionNoAvailableEndpointsError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = String((error as { code?: unknown }).code || "").trim();
+  const message = String((error as { message?: unknown }).message || "").trim();
+  return (code === "" || code === "invalid_dial_targets") && message === "Extension dial requires active registrations";
 }
 
 function createCallWaitPlan(node: any, index: number): CallWaitPlan {
@@ -288,7 +301,7 @@ function createMediaPlan(node: any, index: number, operation: string): MediaPlan
     || OPTION_DEFAULTS.mediaExecution.mode;
   const background = mediaExecutionMode === "background";
   const infiniteTone = operation === "media.playTone" && readBooleanParameter(node, "repeatInfinite", index, false);
-  if (operation === "media.waitMedia") {
+  if (operation === "media.wait") {
     return { operation, background: false, infiniteTone: false, branchCount: WaitMediaBranches.length };
   }
   if (operation === "media.playAudio" || operation === "media.playTone" || operation === "media.recordAudio") {
@@ -302,16 +315,21 @@ function createMediaPlan(node: any, index: number, operation: string): MediaPlan
 
 function createExecutionPlan(node: any, operation: string): ExecutionPlan {
   const planGroup = resolvePlanGroup(operation);
-  if (planGroup === "call" && operation === "call.waitCallEvent") {
+  if (planGroup === "call" && operation === "call.wait") {
     const callWaitPlan = createCallWaitPlan(node, 0);
     return { branchCount: callWaitPlan.branchCount, callWaitPlan, dialWaitPlan: null, mediaPlan: null };
   }
   if (planGroup === "ai" && operation !== "ai.invokeAiTool") {
     return { branchCount: 1, callWaitPlan: null, dialWaitPlan: null, mediaPlan: null };
   }
-  if (planGroup === "dial" && operation === "dial.waitDialEvent") {
+  if (planGroup === "dial" && operation === "dial.wait") {
     const dialWaitPlan = createDialWaitPlan(node, 0);
     return { branchCount: dialWaitPlan.branchCount, callWaitPlan: null, dialWaitPlan, mediaPlan: null };
+  }
+  if (planGroup === "dial" && operation === "dial.make") {
+    const callMode = String(readNodeParameter(node, "callMode", 0, "") || "").trim();
+    const branchCount = callMode === "extension" ? DialMakeBranches.length : 1;
+    return { branchCount, callWaitPlan: null, dialWaitPlan: null, mediaPlan: null };
   }
   if (planGroup === "call" && operation === "call.unbridge") {
     return { branchCount: 2, callWaitPlan: null, dialWaitPlan: null, mediaPlan: null };
@@ -433,7 +451,7 @@ async function executeCallItem(context: ItemExecutionContext): Promise<NodeEmiss
         { branchIndex: 1, item: buildOutputItem(item, { legId: peerLegId }, { legId: peerLegId }) },
       );
     }
-    case "call.waitCallEvent": {
+    case "call.wait": {
       const callWaitPlan = plan.callWaitPlan!;
       const fallbackLegIds = resolveWaitLegIds(node, item, index);
       const fallbackLegId = fallbackLegIds[0] || "";
@@ -459,11 +477,6 @@ async function executeCallItem(context: ItemExecutionContext): Promise<NodeEmiss
       }
 
       return emit(branchIndex, buildOutputItem(item, payload, { legId: resultLegId || undefined }));
-    }
-    case "call.controlRecording": {
-      const legId = requireActionValue("legId", resolveLegId(node, item, index));
-      const result = await executeControlRecording(node, runtime, item, index);
-      return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
     }
     default:
       throw new Error(`Unsupported call operation: ${operation}`);
@@ -500,20 +513,33 @@ async function executeDialItem(context: ItemExecutionContext): Promise<NodeEmiss
   const { node, runtime, item, index, operation, plan } = context;
   switch (operation) {
     case "dial.make": {
-      const result = await executeMakeCall(node, runtime, index);
-      const legId = resultString(result, "legId");
-      const payload: Record<string, unknown> = { dialId: result.dialId };
-      if (legId) {
-        payload.legId = legId;
+      try {
+        const result = await executeMakeCall(node, runtime, index);
+        const legId = resultString(result, "legId");
+        const payload: Record<string, unknown> = { dialId: result.dialId };
+        if (legId) {
+          payload.legId = legId;
+        }
+        return emit(0, buildOutputItem(item, payload, { dialId: result.dialId, legId: legId || undefined }));
+      } catch (error) {
+        const callMode = String(readNodeParameter(node, "callMode", index, "") || "").trim();
+        if (callMode !== "extension" || !isExtensionNoAvailableEndpointsError(error)) {
+          throw error;
+        }
+        const payload = {
+          reason: "no_available_endpoints",
+          message: "No registered endpoints matched the requested extension list.",
+          extensionNumbers: normalizeStringList(String(readNodeParameter(node, "extensionNumbers", index, "") || "")),
+        };
+        return emit(1, buildOutputItem(item, payload));
       }
-      return emit(0, buildOutputItem(item, payload, { dialId: result.dialId, legId: legId || undefined }));
     }
     case "dial.break": {
       const dialId = requireActionValue("dialId", resolveDialId(node, item, index));
       const result = await executeBreakDial(node, runtime, item, index);
       return emit(0, buildOutputItem(item, { dialId: result.dialId || dialId }, { dialId: result.dialId || dialId }));
     }
-    case "dial.waitDialEvent": {
+    case "dial.wait": {
       const dialWaitPlan = plan.dialWaitPlan!;
       const fallbackDialIds = resolveWaitDialIds(node, item, index);
       const fallbackDialId = fallbackDialIds[0] || "";
@@ -566,7 +592,7 @@ async function executeDialItem(context: ItemExecutionContext): Promise<NodeEmiss
 async function executeRespondItem(context: ItemExecutionContext): Promise<NodeEmission[]> {
   const { node, runtime, item, index, operation } = context;
   switch (operation) {
-    case "respond.respondToRecord": {
+    case "respond.toRecord": {
       const recordRequestId = requireActionValue("recordRequestId", resolveRecordRequestId(node, item, index));
       const result = await executeRespondToRecord(node, runtime, item, index);
       const payload = {
@@ -580,7 +606,7 @@ async function executeRespondItem(context: ItemExecutionContext): Promise<NodeEm
         legId: resultString(result, "legId") || undefined,
       }));
     }
-    case "respond.respondToAuth": {
+    case "respond.toAuth": {
       const authRequestId = requireActionValue("authRequestId", resolveAuthRequestId(node, item, index));
       const result = await executeRespondToAuth(node, runtime, item, index);
       return emit(0, buildOutputItem(item, {
@@ -589,7 +615,7 @@ async function executeRespondItem(context: ItemExecutionContext): Promise<NodeEm
         authRequestId: result.authRequestId || authRequestId,
       }));
     }
-    case "respond.respondToAiTool": {
+    case "respond.toAiTool": {
       const aiToolRequestId = requireActionValue("aiToolRequestId", resolveAiToolRequestId(node, item, index));
       const result = await executeRespondToAiTool(node, runtime, item, index);
       return emit(0, buildOutputItem(item, {
@@ -606,17 +632,17 @@ async function executeRespondItem(context: ItemExecutionContext): Promise<NodeEm
 async function executeQueueItem(context: ItemExecutionContext): Promise<NodeEmission[]> {
   const { node, runtime, item, index, operation } = context;
   switch (operation) {
-    case "queue.enqueueLeg": {
+    case "queue.putLeg": {
       const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "queueOptions"));
       const result = await executeEnqueueLeg(node, runtime, item, index);
       return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
     }
-    case "queue.setQueueCallback": {
+    case "queue.setCallback": {
       const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "queueOptions"));
       const result = await executeSetQueueCallback(node, runtime, item, index);
       return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
     }
-    case "queue.getQueueStats": {
+    case "queue.getStats": {
       const ref =
         String(readNodeParameter(node, "ref", index, ""))
         || String((item?.json && item.json.ref) || (item?.json?.sipPbx && item.json.sipPbx.ref) || "").trim();
@@ -647,6 +673,30 @@ async function executeQueueItem(context: ItemExecutionContext): Promise<NodeEmis
   }
 }
 
+async function executeRecordingItem(context: ItemExecutionContext): Promise<NodeEmission[]> {
+  const { node, runtime, item, index, operation } = context;
+  switch (operation) {
+    case "recording.control": {
+      const legId = requireActionValue("legId", resolveLegId(node, item, index));
+      const result = await executeControlRecording(node, runtime, item, index);
+      return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
+    }
+    case "recording.start": {
+      const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "recordingOptions"));
+      const result = await executeStartGlobalRecording(node, runtime, item, index);
+      const payload = {
+        ...(result || {}),
+        legId: resultString(result, "legId", legId),
+      };
+      return emit(0, buildOutputItem(item, payload, {
+        legId: resultString(result, "legId", legId) || undefined,
+      }));
+    }
+    default:
+      throw new Error(`Unsupported recording operation: ${operation}`);
+  }
+}
+
 async function executeMediaItem(context: ItemExecutionContext): Promise<NodeEmission[]> {
   const { node, runtime, item, index, operation, plan } = context;
   const mediaPlan = plan.mediaPlan!;
@@ -666,7 +716,7 @@ async function executeMediaItem(context: ItemExecutionContext): Promise<NodeEmis
     case "media.stopMedia":
       result = await executeStopMedia(node, runtime, item, index);
       break;
-    case "media.waitMedia":
+    case "media.wait":
       result = await executeWaitMedia(node, runtime, item, index);
       break;
     case "media.sendDtmf":
@@ -696,7 +746,7 @@ async function executeMediaItem(context: ItemExecutionContext): Promise<NodeEmis
   let branchIndex = 0;
   let branchKind: MediaBranchKind = MEDIA_EVENT_COMPLETED;
 
-  if (operation === "media.waitMedia") {
+  if (operation === "media.wait") {
     if (isInterruptedResult(result)) {
       branchIndex = requireBranchIndex(WaitMediaBranches, WaitMediaBranchInterrupted);
       branchKind = MEDIA_EVENT_INTERRUPTED;
@@ -744,6 +794,8 @@ async function executeActionItem(context: ItemExecutionContext): Promise<NodeEmi
       return await executeRespondItem(context);
     case "queue":
       return await executeQueueItem(context);
+    case "recording":
+      return await executeRecordingItem(context);
     case "media":
       return await executeMediaItem(context);
     default:

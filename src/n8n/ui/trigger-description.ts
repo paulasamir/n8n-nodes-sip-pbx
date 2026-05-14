@@ -4,6 +4,7 @@ import {
   ExtensionsTriggerBranchCall,
   ExtensionsTriggerBranchRecord,
   QueueTriggerBranches,
+  TrunkTriggerBranchAuth,
   TrunkTriggerBranchCall,
   TrunkTriggerBranchRecord,
 } from "../../shared/branches";
@@ -18,6 +19,7 @@ function triggerOutputsExpression(): string {
   const queue = listToOutputs(QueueTriggerBranches);
   const callName = JSON.stringify(TrunkTriggerBranchCall);
   const recordName = JSON.stringify(TrunkTriggerBranchRecord);
+  const trunkAuthName = JSON.stringify(TrunkTriggerBranchAuth);
   const authName = JSON.stringify(ExtensionsTriggerBranchAuth);
   const extCallName = JSON.stringify(ExtensionsTriggerBranchCall);
   const extRecordName = JSON.stringify(ExtensionsTriggerBranchRecord);
@@ -40,6 +42,9 @@ function triggerOutputsExpression(): string {
     if ($parameter["enableCallRecording"]) {
       outputs.push({ type: "main", displayName: ${recordName} });
     }
+    if ($parameter["trunkRegisterMode"] === "auth") {
+      outputs.push({ type: "main", displayName: ${trunkAuthName} });
+    }
     return outputs;
   })()}}`;
 }
@@ -52,7 +57,9 @@ export function createSipPbxTriggerDescription(): Record<string, unknown> {
     icon: "file:siptg-phone.svg",
     group: ["trigger"],
     version: 1,
-    subtitle: '={{$parameter["triggerOn"] === "extensions" ? "Extensions" : ($parameter["triggerOn"] === "queue" ? "Queue" : ($parameter["triggerOn"] === "aiTool" ? "AI Tool" : "Trunk"))}}',
+    subtitle: `={{(() => {
+      return $parameter["triggerOn"] + ": " + $parameter["ref"];
+    })()}}`,
     defaults: { name: "SIP PBX Trigger" },
     keywords: [
       "sip",
@@ -73,7 +80,7 @@ export function createSipPbxTriggerDescription(): Record<string, unknown> {
       {
         name: "sipPbxExternal",
         required: false,
-        displayOptions: { show: { triggerOn: ["trunk"] } },
+        displayOptions: { show: { triggerOn: ["trunk"], trunkRegisterMode: ["register"] } },
       },
     ],
     properties: buildTriggerNodeProperties(),

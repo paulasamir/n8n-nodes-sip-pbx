@@ -33,7 +33,7 @@ async function runScenario(name, order) {
   const triggerEvents = [];
   const triggerStream = await runtime.openExtensionsTrigger({
     ref: `autoshutdown-${name}`,
-    extensionsLocalBindPort: 0,
+    localBindPort: 0,
     authMode: "raw",
   }, (event) => triggerEvents.push(event));
 

@@ -126,7 +126,7 @@ async function testMediaRecordAndWait() {
     const waitNode = new SipPbx();
     Object.assign(waitNode, createExecuteContext({
       resource: "media",
-      operation: "media.waitMedia",
+      operation: "media.wait",
       waitMediaIds: { item: [{ mediaId: "media-record-1" }] },
       waitMediaTimeoutSeconds: 5,
     }, [{ json: {} }]));

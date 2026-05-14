@@ -950,19 +950,20 @@ async function main() {
     }, (event) => trunkEvents.push(event));
     const extensionsStreamA = await runtime.openExtensionsTrigger({
       ref: "office-ext-runtime",
-      extensionsLocalBindPort: 0,
+      localBindPort: 0,
       authMode: "raw",
       authTimeoutSeconds: 0.025,
     }, (event) => extensionsEventsA.push(event));
     const extensionsStreamB = await runtime.openExtensionsTrigger({
       ref: "office-ext-runtime",
-      extensionsLocalBindPort: 0,
+      localBindPort: 0,
       authMode: "raw",
       authTimeoutSeconds: 0.025,
       extensionsEnableCallRecording: true,
     }, (event) => extensionsEventsB.push(event));
     daemon.authService.createRequest({
       triggerKey: "wf:office-ext-runtime",
+      triggerKind: "extensions",
       ref: "office-ext-runtime",
       requestContext: {
         requestType: "register",
@@ -992,12 +993,12 @@ async function main() {
     assert.ok(extensionsEventsB.some((event) => event.branch === "Call" && event.payload.legId === sessionInvite.legId && event.payload.callId === "auto-ext-call-1"));
     assert.ok(trunkEvents.some((event) => event.branch === "Call" && event.payload.callId === "auto-trunk-call-1"));
     await waitForCondition(
-      () => trunkEvents.some((event) => event.branch === "Record") && extensionsEventsB.some((event) => event.branch === "Record"),
+      () => trunkEvents.some((event) => event.branch === "Recording") && extensionsEventsB.some((event) => event.branch === "Recording"),
       1500,
       "record trigger emitted",
     );
-    const trunkRecordEvent = trunkEvents.find((event) => event.branch === "Record");
-    const extensionsRecordEvent = extensionsEventsB.find((event) => event.branch === "Record");
+    const trunkRecordEvent = trunkEvents.find((event) => event.branch === "Recording");
+    const extensionsRecordEvent = extensionsEventsB.find((event) => event.branch === "Recording");
     assert.ok(trunkRecordEvent && trunkRecordEvent.payload && trunkRecordEvent.payload.recordRequestId);
     assert.ok(extensionsRecordEvent && extensionsRecordEvent.payload && extensionsRecordEvent.payload.recordRequestId);
     const extensionsRecordPath = path.join(recordingDir, `extensions-100-auto-ext-call-1-${sessionInvite.legId}.wav`);
@@ -1037,8 +1038,8 @@ async function main() {
     const staticExtensionsStream = await runtime.openExtensionsTrigger({
       ref: "office-ext-sip",
       transport: "udp",
-      extensionsLocalBindIp: "127.0.0.1",
-      extensionsLocalBindPort: 0,
+      localBindIp: "127.0.0.1",
+      localBindPort: 0,
       advertisedIp: "127.0.0.1",
       realm: "office.test",
       authMode: "static",
@@ -1261,8 +1262,8 @@ async function main() {
 	    const rawAuthStream = await runtime.openExtensionsTrigger({
 	      ref: "office-ext-raw",
 	      transport: "udp",
-	      extensionsLocalBindIp: "127.0.0.1",
-	      extensionsLocalBindPort: 0,
+	      localBindIp: "127.0.0.1",
+	      localBindPort: 0,
 	      advertisedIp: "127.0.0.1",
 	      realm: "office.raw",
 	      authMode: "raw",
@@ -1303,8 +1304,8 @@ async function main() {
 	    const digestAuthStream = await runtime.openExtensionsTrigger({
 	      ref: "office-ext-digest",
 	      transport: "udp",
-	      extensionsLocalBindIp: "127.0.0.1",
-	      extensionsLocalBindPort: 0,
+	      localBindIp: "127.0.0.1",
+	      localBindPort: 0,
 	      advertisedIp: "127.0.0.1",
 	      realm: "office.digest",
 	      authMode: "digest-first",
@@ -2028,7 +2029,7 @@ async function main() {
 	    const trunkProviderAddress = trunkProvider.address();
 	    const registeringTrunkStream = await runtime.openTrunkTrigger({
 	      ref: "carrier-outbound",
-	      registerOnStart: true,
+	      trunkRegisterMode: "register",
 	      registrationExpires: 2,
 	      sipCredentials: {
 	        sipServer: "127.0.0.1",
@@ -2162,7 +2163,7 @@ async function main() {
 	    const realTrunkEvents = [];
 	    const realTrunkStream = await runtime.openTrunkTrigger({
       ref: "carrier-sip",
-      registerOnStart: true,
+      trunkRegisterMode: "register",
       registrationExpires: 60,
       sipCredentials: {
         sipServer: "127.0.0.1",
@@ -2352,7 +2353,7 @@ async function main() {
     const graceEventsB = [];
     const graceStreamA = await runtime.openExtensionsTrigger({
       ref: "office-ext-grace",
-      extensionsLocalBindPort: 0,
+      localBindPort: 0,
       authMode: "raw",
       authTimeoutSeconds: 0.025,
     }, (event) => graceEventsA.push(event));
@@ -2364,7 +2365,7 @@ async function main() {
     await graceStreamA.close();
     const graceStreamB = await runtime.openExtensionsTrigger({
       ref: "office-ext-grace",
-      extensionsLocalBindPort: 0,
+      localBindPort: 0,
       authMode: "raw",
       authTimeoutSeconds: 0.025,
     }, (event) => graceEventsB.push(event));

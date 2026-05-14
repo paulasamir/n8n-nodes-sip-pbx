@@ -1538,6 +1538,14 @@ export class MediaService {
     }
   }
 
+  async restartGlobalCallRecording(legId: string, input: Record<string, unknown>): Promise<{ legId: string }> {
+    this.legService.requireLeg(legId);
+    if (this.globalCallRecordings.has(legId)) {
+      await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: "restart" });
+    }
+    return await this.startGlobalCallRecording(legId, input);
+  }
+
   async waitForGlobalCallRecording(legId: string, context?: RequestContext | null): Promise<Record<string, unknown>> {
     const state = this.globalCallRecordings.get(legId) || null;
     if (!state) {

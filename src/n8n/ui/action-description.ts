@@ -2,6 +2,8 @@ import {
   ActionResultBranch,
   BridgeBranch,
   buildCallWaitStaticTail,
+  DialMakeBranchUnavailable,
+  DialMakeBranchResult,
   DialWaitBranchAnswered,
   DialWaitBranchFailed,
   DialWaitBranchProgress,
@@ -48,6 +50,8 @@ function actionOutputsExpression(): string {
   const callWaitTailWithFallback = buildCallWaitStaticTail(true);
   const callTailNoFallbackJs = JSON.stringify(callWaitTailNoFallback);
   const callTailWithFallbackJs = JSON.stringify(callWaitTailWithFallback);
+  const dialMakeResult = JSON.stringify(DialMakeBranchResult);
+  const dialMakeUnavailable = JSON.stringify(DialMakeBranchUnavailable);
   const dialRinging = JSON.stringify(DialWaitBranchRinging);
   const dialProgress = JSON.stringify(DialWaitBranchProgress);
   const dialAnswered = JSON.stringify(DialWaitBranchAnswered);
@@ -66,7 +70,16 @@ function actionOutputsExpression(): string {
     if (operation === "call.bridge") return [{ type: "main", displayName: ${bridge} }];
     if (operation === "ai.attachVoiceAgent") return [{ type: "main", displayName: ${result} }];
     if (operation === "call.unbridge") return [${unbridge}];
-    if (operation === "call.waitCallEvent") {
+    if (operation === "dial.make") {
+      if ($parameter["callMode"] === "extension") {
+        return [
+          { type: "main", displayName: ${dialMakeResult} },
+          { type: "main", displayName: ${dialMakeUnavailable} },
+        ];
+      }
+      return [{ type: "main", displayName: ${result} }];
+    }
+    if (operation === "call.wait") {
       const rulesRoot = $parameter["rules"] || {};
       const rules = Array.isArray(rulesRoot.item) ? rulesRoot.item : [];
       const outputs = rules
@@ -76,7 +89,7 @@ function actionOutputsExpression(): string {
       for (const name of tail) outputs.push({ type: "main", displayName: name });
       return outputs;
     }
-    if (operation === "dial.waitDialEvent") {
+    if (operation === "dial.wait") {
       const selected = Array.isArray($parameter["waitEventOutputs"]) ? $parameter["waitEventOutputs"] : [];
       const outputs = [];
       if (selected.includes("ringing")) outputs.push({ type: "main", displayName: ${dialRinging} });
@@ -87,7 +100,7 @@ function actionOutputsExpression(): string {
       outputs.push({ type: "main", displayName: ${dialFailed} });
       return outputs;
     }
-    if (operation === "media.waitMedia") {
+    if (operation === "media.wait") {
       return [${waitMedia}];
     }
     if (operation === "media.playAudio" || operation === "media.playTone" || operation === "media.recordAudio") {
@@ -106,7 +119,6 @@ function actionOutputsExpression(): string {
 function actionSubtitleExpression(): string {
   return `={{(() => {
     const operation = $parameter["operation"];
-    if (operation === "call.waitCallEvent" || operation === "dial.waitDialEvent") return "waitForEvent";
     return operation;
   })()}}`;
 }
@@ -157,7 +169,7 @@ export function createSipPbxActionDescription(): Record<string, unknown> {
       },
       {
         name: "sipPbxExternal",
-        required: true,
+        required: false,
         displayOptions: { show: { resource: ["dial"], operation: ["dial.make"], callMode: ["direct"] } },
       },
       ...buildWebSocketDialProfileCredentials({ resource: ["dial"], operation: ["dial.make"], callMode: ["websocket"] }),

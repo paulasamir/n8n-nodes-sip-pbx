@@ -1,6 +1,7 @@
 export type InteractiveAuthRequest = {
   authRequestId: string;
   triggerKey: string;
+  triggerKind: "extensions" | "trunk";
   ref: string;
   publicRef?: string;
   timeout: number;

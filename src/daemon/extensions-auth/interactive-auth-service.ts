@@ -36,6 +36,7 @@ export class InteractiveAuthService {
     const request: InteractiveAuthRequest = {
       authRequestId: newAuthRequestId(),
       triggerKey: input.triggerKey,
+      triggerKind: input.triggerKind,
       ref: input.ref,
       publicRef: input.publicRef,
       timeout,

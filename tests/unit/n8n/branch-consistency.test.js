@@ -51,15 +51,21 @@ test("ai tool trigger declares exactly the registry-ordered branches", () => {
   assert.strictEqual(count, branches.AiToolTriggerBranches.length);
 });
 
-test("trunk trigger output count matches buildTrunkTriggerBranchOrder for both record settings", () => {
-  assert.strictEqual(
-    triggerOutputCount({ triggerOn: "trunk", enableCallRecording: false }),
-    branches.buildTrunkTriggerBranchOrder(false).length,
-  );
-  assert.strictEqual(
-    triggerOutputCount({ triggerOn: "trunk", enableCallRecording: true }),
-    branches.buildTrunkTriggerBranchOrder(true).length,
-  );
+test("trunk trigger output count matches buildTrunkTriggerBranchOrder for register/record combinations", () => {
+  for (const trunkRegisterMode of ["register", "auth"]) {
+    for (const enableCallRecording of [false, true]) {
+      assert.strictEqual(
+        triggerOutputCount({ triggerOn: "trunk", trunkRegisterMode, enableCallRecording }),
+        branches.buildTrunkTriggerBranchOrder(enableCallRecording, trunkRegisterMode === "auth").length,
+      );
+    }
+  }
+});
+
+test("recording and auth trigger branches use stable names", () => {
+  assert.strictEqual(branches.TrunkTriggerBranchRecord, "Recording");
+  assert.strictEqual(branches.TrunkTriggerBranchAuth, "Auth");
+  assert.strictEqual(branches.ExtensionsTriggerBranchRecord, "Recording");
 });
 
 test("extensions trigger output count matches buildExtensionsTriggerBranchOrder for all combinations", () => {
@@ -81,15 +87,24 @@ test("extensions trigger output count matches buildExtensionsTriggerBranchOrder 
 
 test("single-output actions declare one branch (Result-style)", () => {
   for (const op of [
-    "call.ringing", "call.answer", "call.hangup", "call.controlRecording",
-    "dial.make", "dial.break",
+    "call.ringing", "call.answer", "call.hangup",
+    "recording.control", "recording.start",
+    "dial.break",
     "media.stopMedia", "media.sendDtmf",
-    "queue.enqueueLeg", "queue.setQueueCallback", "queue.getQueueStats",
-    "respond.respondToRecord", "respond.respondToAuth", "respond.respondToAiTool",
+    "queue.putLeg", "queue.setCallback", "queue.getStats",
+    "respond.toRecord", "respond.toAuth", "respond.toAiTool",
     "ai.attachVoiceAgent",
   ]) {
     assert.strictEqual(uiOutputCount(op), 1, `${op} should declare exactly 1 output`);
   }
+});
+
+test("dial.make declares one branch for non-extension modes and two branches for extension mode", () => {
+  assert.strictEqual(uiOutputCount("dial.make", { callMode: "trunk" }), 1);
+  assert.strictEqual(uiOutputCount("dial.make", { callMode: "direct" }), 1);
+  assert.strictEqual(uiOutputCount("dial.make", { callMode: "websocket" }), 1);
+  assert.strictEqual(uiOutputCount("dial.make", { callMode: "extension" }), branches.DialMakeBranches.length);
+  assert.deepStrictEqual(branches.DialMakeBranches, ["Result", "Unavailable"]);
 });
 
 test("call.bridge declares one branch (BridgeBranch)", () => {
@@ -100,8 +115,8 @@ test("call.unbridge declares Orig + Peer", () => {
   assert.strictEqual(uiOutputCount("call.unbridge"), branches.UnbridgeBranches.length);
 });
 
-test("media.waitMedia declares Interrupted/Timeout/Completed", () => {
-  assert.strictEqual(uiOutputCount("media.waitMedia"), branches.WaitMediaBranches.length);
+test("media.wait declares Interrupted/Timeout/Completed", () => {
+  assert.strictEqual(uiOutputCount("media.wait"), branches.WaitMediaBranches.length);
   assert.deepStrictEqual(branches.WaitMediaBranches, ["Interrupted", "Timeout", "Completed"]);
 });
 
@@ -132,7 +147,7 @@ test("media.playTone with repeatInfinite declares 1 branch (Interrupted)", () =>
   );
 });
 
-test("dial.waitDialEvent output count matches the runtime plan for every selectedOutput combination", () => {
+test("dial.wait output count matches the runtime plan for every selectedOutput combination", () => {
   for (const includeRinging of [false, true]) {
     for (const includeProgress of [false, true]) {
       for (const includeRejected of [false, true]) {
@@ -140,7 +155,7 @@ test("dial.waitDialEvent output count matches the runtime plan for every selecte
         if (includeRinging) selected.push("ringing");
         if (includeProgress) selected.push("progress");
         if (includeRejected) selected.push("rejected");
-        const ui = uiOutputCount("dial.waitDialEvent", { waitEventOutputs: selected });
+        const ui = uiOutputCount("dial.wait", { waitEventOutputs: selected });
         const plan = branches.buildDialWaitBranchOrder({ includeRinging, includeProgress, includeRejected }).length;
         assert.strictEqual(ui, plan, `dial selected=${selected.join(",")}: ui=${ui} plan=${plan}`);
       }
@@ -148,7 +163,7 @@ test("dial.waitDialEvent output count matches the runtime plan for every selecte
   }
 });
 
-test("dial.waitDialEvent branch order keeps Timeout before Failed and Rejected before Answered", () => {
+test("dial.wait branch order keeps Timeout before Failed and Rejected before Answered", () => {
   assert.deepStrictEqual(
     branches.buildDialWaitBranchOrder({ includeRinging: false, includeProgress: false, includeRejected: false }),
     ["Answered", "Timeout", "Failed"],
@@ -159,7 +174,7 @@ test("dial.waitDialEvent branch order keeps Timeout before Failed and Rejected b
   );
 });
 
-test("call.waitCallEvent output count = rules + static tail", () => {
+test("call.wait output count = rules + static tail", () => {
   const rulesShape = [
     { rules: { item: [] }, expectedRuleCount: 0 },
     { rules: { item: [{ pattern: "1", label: "A" }] }, expectedRuleCount: 1 },
@@ -169,13 +184,13 @@ test("call.waitCallEvent output count = rules + static tail", () => {
   for (const withFallback of [false, true]) {
     const tailSize = branches.buildCallWaitStaticTail(withFallback).length;
     for (const { rules, expectedRuleCount } of rulesShape) {
-      const ui = uiOutputCount("call.waitCallEvent", { rules, waitDtmfFallbackEnabled: withFallback });
+      const ui = uiOutputCount("call.wait", { rules, waitDtmfFallbackEnabled: withFallback });
       assert.strictEqual(ui, expectedRuleCount + tailSize, `fallback=${withFallback} rules=${expectedRuleCount}: got ${ui}`);
     }
   }
 });
 
-test("call.waitCallEvent static tail order keeps Ended last", () => {
+test("call.wait static tail order keeps Ended last", () => {
   assert.deepStrictEqual(
     branches.buildCallWaitStaticTail(false),
     ["Interrupt", "Timeout", "Ended"],
@@ -197,7 +212,7 @@ test("buildEmptyOutputs has one [] slot per branch", () => {
     branches.QueueTriggerBranches,
     branches.UnbridgeBranches,
     branches.WaitMediaBranches,
-    branches.buildTrunkTriggerBranchOrder(true),
+    branches.buildTrunkTriggerBranchOrder(true, true),
     branches.buildExtensionsTriggerBranchOrder(true, true),
     branches.buildDialWaitBranchOrder({ includeRinging: true, includeProgress: true, includeRejected: true }),
     branches.buildCallWaitStaticTail(true),

@@ -8,8 +8,6 @@
  * sites both read from these tables.
  */
 
-// === Triggers =============================================================
-
 export const QueueTriggerBranchPlaced = "Placed" as const;
 export const QueueTriggerBranchDispatch = "Dispatch" as const;
 export const QueueTriggerBranchOffline = "Offline" as const;
@@ -37,25 +35,33 @@ export type VoiceAgentStreamBranch =
 
 /**
  * Trunk trigger has one always-present branch (Call) and one optional
- * (Record) appended when call recording is enabled.
+ * (Recording) appended when call recording is enabled.
  */
 export const TrunkTriggerBranchCall = "Call" as const;
-export const TrunkTriggerBranchRecord = "Record" as const;
-export type TrunkTriggerBranch = typeof TrunkTriggerBranchCall | typeof TrunkTriggerBranchRecord;
+export const TrunkTriggerBranchRecord = "Recording" as const;
+export const TrunkTriggerBranchAuth = "Auth" as const;
+export type TrunkTriggerBranch =
+  | typeof TrunkTriggerBranchCall
+  | typeof TrunkTriggerBranchRecord
+  | typeof TrunkTriggerBranchAuth;
 
-export function buildTrunkTriggerBranchOrder(enableRecording: boolean): readonly TrunkTriggerBranch[] {
-  return enableRecording
-    ? [TrunkTriggerBranchCall, TrunkTriggerBranchRecord]
-    : [TrunkTriggerBranchCall];
+export function buildTrunkTriggerBranchOrder(
+  enableRecording: boolean,
+  enableAuth: boolean,
+): readonly TrunkTriggerBranch[] {
+  const order: TrunkTriggerBranch[] = [TrunkTriggerBranchCall];
+  if (enableRecording) order.push(TrunkTriggerBranchRecord);
+  if (enableAuth) order.push(TrunkTriggerBranchAuth);
+  return order;
 }
 
 /**
- * Extensions trigger order: Call (always) → Record (if recording on) → Auth
- * (if authMode !== "static"). Index of Auth depends on whether Record is
+ * Extensions trigger order: Call (always) → Recording (if recording on) → Auth
+ * (if authMode !== "static"). Index of Auth depends on whether Recording is
  * present, so all consumers must derive their index via `indexOf`.
  */
 export const ExtensionsTriggerBranchCall = "Call" as const;
-export const ExtensionsTriggerBranchRecord = "Record" as const;
+export const ExtensionsTriggerBranchRecord = "Recording" as const;
 export const ExtensionsTriggerBranchAuth = "Auth" as const;
 export type ExtensionsTriggerBranch =
   | typeof ExtensionsTriggerBranchCall
@@ -72,23 +78,19 @@ export function buildExtensionsTriggerBranchOrder(
   return order;
 }
 
-// === Action: single-output (most actions) =================================
-
 export const ActionResultBranch = "Result" as const;
 export const ActionResultBranches = [ActionResultBranch] as const;
 
-// === Action: call.bridge ==================================================
+export const DialMakeBranchResult = "Result" as const;
+export const DialMakeBranchUnavailable = "Unavailable" as const;
+export const DialMakeBranches = [DialMakeBranchResult, DialMakeBranchUnavailable] as const;
 
 export const BridgeBranch = "Success" as const;
 export const BridgeBranches = [BridgeBranch] as const;
 
-// === Action: call.unbridge ================================================
-
 export const UnbridgeBranchOrig = "Orig" as const;
 export const UnbridgeBranchPeer = "Peer" as const;
 export const UnbridgeBranches = [UnbridgeBranchOrig, UnbridgeBranchPeer] as const;
-
-// === Action: media.waitMedia ==============================================
 
 export const WaitMediaBranchInterrupted = "Interrupted" as const;
 export const WaitMediaBranchCompleted = "Completed" as const;
@@ -98,8 +100,6 @@ export const WaitMediaBranches = [
   WaitMediaBranchTimeout,
   WaitMediaBranchCompleted,
 ] as const;
-
-// === Action: media.playAudio / playTone / recordAudio =====================
 
 export const MediaBlockingBranchInterrupted = "Interrupted" as const;
 export const MediaBlockingBranchCompleted = "Completed" as const;
@@ -112,8 +112,6 @@ export const MediaBlockingBranches = [
 ] as const;
 export const MediaBackgroundBranches = [MediaBackgroundBranchResult] as const;
 export const MediaInfiniteToneBranches = [MediaInfiniteToneBranchInterrupted] as const;
-
-// === Action: dial.waitDialEvent (optional + mandatory) ====================
 
 export const DialWaitBranchRinging = "Ringing" as const;
 export const DialWaitBranchProgress = "Progress" as const;
@@ -144,11 +142,10 @@ export function buildDialWaitBranchOrder(input: {
   return order;
 }
 
-// === Action: call.waitCallEvent (DTMF labels + static tail) ===============
-//
-// The leading branches are dynamic — one per user-defined DTMF rule label.
-// The static tail in order: DTMF Fallback (optional), Interrupt, Timeout, Ended.
-
+/**
+ * The leading branches are dynamic — one per user-defined DTMF rule label.
+ * The static tail in order: DTMF Fallback (optional), Interrupt, Timeout, Ended.
+ */
 export const CallWaitBranchDtmfFallback = "DTMF Fallback" as const;
 export const CallWaitBranchInterrupt = "Interrupt" as const;
 export const CallWaitBranchEnded = "Ended" as const;
@@ -167,8 +164,6 @@ export function buildCallWaitStaticTail(includeDtmfFallback: boolean): readonly 
   tail.push(CallWaitBranchEnded);
   return tail;
 }
-
-// === Helpers ==============================================================
 
 /**
  * Safe `indexOf` for branch orders. Returns the index, or throws — callers

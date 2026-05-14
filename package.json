@@ -18,7 +18,7 @@
     "ai",
     "siptg"
   ],
-  "homepage": "https://github.com/siptg/n8n-nodes-sip-pbx#readme",
+  "homepage": "https://github.com/siptg/n8n-nodes-sip-pbx/wiki",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/siptg/n8n-nodes-sip-pbx.git"

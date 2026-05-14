@@ -45,7 +45,7 @@ test("SipPbxDaemon publishes outbound trunk Record requests for dial.make when t
   await daemon.signalingService.answerLeg(result.legId);
   assert.strictEqual(published.length, 1);
   assert.strictEqual(published[0].kind, "trunk");
-  assert.strictEqual(published[0].branch, "Record");
+  assert.strictEqual(published[0].branch, "Recording");
   assert.strictEqual(published[0].payload.eventType, "record");
   assert.strictEqual(published[0].payload.kind, "trunk");
   assert.strictEqual(published[0].payload.ref, "trunk-a");
@@ -110,7 +110,7 @@ test("SipPbxDaemon publishes outbound extensions Record requests for the answere
 
   assert.strictEqual(published.length, 1);
   assert.strictEqual(published[0].kind, "extensions");
-  assert.strictEqual(published[0].branch, "Record");
+  assert.strictEqual(published[0].branch, "Recording");
   assert.strictEqual(published[0].payload.kind, "extensions");
   assert.strictEqual(published[0].payload.ref, "office-ext");
   assert.strictEqual(published[0].payload.legId, winnerLegId);

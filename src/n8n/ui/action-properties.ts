@@ -31,6 +31,89 @@ function buildStopOtherMediaOption(): UiProperty {
   };
 }
 
+function buildGlobalRecordingPrimaryProperties(show: Record<string, unknown>, includeActive: boolean): UiProperty[] {
+  const contentShow = includeActive ? { ...show, active: [true] } : show;
+  const properties: UiProperty[] = [];
+  if (includeActive) {
+    properties.push({
+      displayName: "Record the call",
+      name: "active",
+      type: "boolean",
+      default: true,
+      description: "When enabled, starts global recording for the active leg. When disabled, the action returns without starting recording.",
+      displayOptions: { show },
+    });
+  }
+  properties.push(
+    {
+      displayName: "File Path",
+      name: "recordFilePath",
+      type: "string",
+      default: "",
+      required: true,
+      description: RECORD_FILE_PATH_HINT,
+      displayOptions: { show: contentShow },
+    },
+    {
+      displayName: "File Format",
+      name: "recordFileFormat",
+      type: "options",
+      default: OPTION_DEFAULTS.recordAudio.fileFormat,
+      displayOptions: { show: contentShow },
+      options: [{ name: "WAV", value: "wav" }, { name: "MP3", value: "mp3" }, { name: "Opus", value: "opus" }, { name: "OGG", value: "ogg" }],
+    },
+    {
+      displayName: "Split Channels",
+      name: "recordSplitChannels",
+      type: "boolean",
+      default: OPTION_DEFAULTS.autoRecording.splitChannels,
+      description: "When enabled, call recording writes inbound audio to channel 1 and outbound PBX audio to channel 2.",
+      displayOptions: { show: contentShow },
+    },
+    {
+      displayName: "Wait For Recording Completion",
+      name: "waitForRecordingCompletion",
+      type: "boolean",
+      default: OPTION_DEFAULTS.autoRecording.waitForCompletion,
+      displayOptions: { show: contentShow },
+    },
+  );
+  return properties;
+}
+
+function buildGlobalRecordingOptionsCollections(
+  collectionName: string,
+  show: Record<string, unknown>,
+  idOption: UiProperty,
+  includeActive: boolean,
+): UiProperty[] {
+  const result: UiProperty[] = [];
+
+  if (includeActive) {
+    result.push(buildAddOptionsCollectionProperty(collectionName, { ...show, active: [false] }, [idOption]));
+  }
+
+  const baseShow = includeActive ? { ...show, active: [true] } : show;
+
+  result.push(
+    buildAddOptionsCollectionProperty(collectionName, { ...baseShow, recordFileFormat: ["wav"] }, [
+      idOption,
+      { displayName: "WAV Sample Rate", name: "recordWavSampleRate", type: "number", default: OPTION_DEFAULTS.recordAudio.wavSampleRate },
+      { displayName: "WAV Bit Depth", name: "recordWavBitDepth", type: "number", default: OPTION_DEFAULTS.recordAudio.wavBitDepth },
+    ]),
+  );
+
+  result.push(
+    buildAddOptionsCollectionProperty(collectionName, { ...baseShow, recordFileFormat: ["mp3", "opus", "ogg"] }, [
+      idOption,
+      { displayName: "Compressed Sample Rate", name: "recordCompressedSampleRate", type: "number", default: OPTION_DEFAULTS.recordAudio.compressedSampleRate },
+      { displayName: "Compressed Bitrate", name: "recordCompressedBitrate", type: "number", default: OPTION_DEFAULTS.recordAudio.compressedBitrateKbps },
+    ]),
+  );
+
+  return result;
+}
+
 export function buildActionNodeProperties(): UiProperty[] {
   return [
     {
@@ -44,6 +127,7 @@ export function buildActionNodeProperties(): UiProperty[] {
         { name: "Dial", value: "dial" },
         { name: "Media", value: "media" },
         { name: "Queue", value: "queue" },
+        { name: "Global recording", value: "recording" },
         { name: "AI", value: "ai" },
         { name: "Respond", value: "respond" },
       ],
@@ -62,8 +146,7 @@ export function buildActionNodeProperties(): UiProperty[] {
         { name: "Hangup", value: "call.hangup", action: "Hang up call" },
         { name: "Bridge", value: "call.bridge", action: "Bridge calls" },
         { name: "Unbridge", value: "call.unbridge", action: "Unbridge call" },
-        { name: "Wait For Event", value: "call.waitCallEvent", action: "Wait for call event" },
-        { name: "Global Recording", value: "call.controlRecording", action: "Global recording" },
+        { name: "Wait Event", value: "call.wait", action: "Wait call event" },
       ],
     },
     {
@@ -77,7 +160,7 @@ export function buildActionNodeProperties(): UiProperty[] {
       options: [
         { name: "Make Call", value: "dial.make", action: "Create dial" },
         { name: "Break", value: "dial.break", action: "Break dial" },
-        { name: "Wait For Event", value: "dial.waitDialEvent", action: "Wait for dial event" },
+        { name: "Wait Event", value: "dial.wait", action: "Wait dial event" },
       ],
     },
     {
@@ -93,7 +176,7 @@ export function buildActionNodeProperties(): UiProperty[] {
         { name: "Play Tone", value: "media.playTone", action: "Play tone" },
         { name: "Record Audio", value: "media.recordAudio", action: "Record audio" },
         { name: "Stop Media", value: "media.stopMedia", action: "Stop media" },
-        { name: "Wait Media", value: "media.waitMedia", action: "Wait media" },
+        { name: "Wait Media", value: "media.wait", action: "Wait media" },
         { name: "Send DTMF", value: "media.sendDtmf", action: "Send DTMF" },
       ],
     },
@@ -106,9 +189,22 @@ export function buildActionNodeProperties(): UiProperty[] {
       default: "",
       displayOptions: { show: { resource: ["queue"] } },
       options: [
-        { name: "Put Leg In Queue", value: "queue.enqueueLeg", action: "Put leg in queue" },
-        { name: "Set Callback", value: "queue.setQueueCallback", action: "Set queue callback" },
-        { name: "Get Queue Stats", value: "queue.getQueueStats", action: "Get queue stats" },
+        { name: "Put Leg In Queue", value: "queue.putLeg", action: "Put leg in queue" },
+        { name: "Set Callback", value: "queue.setCallback", action: "Set queue callback" },
+        { name: "Get Queue Stats", value: "queue.getStats", action: "Get queue stats" },
+      ],
+    },
+    {
+      displayName: "Operation",
+      name: "operation",
+      type: "options",
+      noDataExpression: true,
+      required: true,
+      default: "",
+      displayOptions: { show: { resource: ["recording"] } },
+      options: [
+        { name: "Start recording", value: "recording.start", action: "Start recording" },
+        { name: "Control recording", value: "recording.control", action: "Control recording" },
       ],
     },
     {
@@ -133,9 +229,9 @@ export function buildActionNodeProperties(): UiProperty[] {
       default: "",
       displayOptions: { show: { resource: ["respond"] } },
       options: [
-        { name: "Respond To Record", value: "respond.respondToRecord", action: "Respond to record" },
-        { name: "Respond To Auth", value: "respond.respondToAuth", action: "Respond to auth" },
-        { name: "Respond To AI Tool", value: "respond.respondToAiTool", action: "Respond to AI tool" },
+        { name: "Respond to recording", value: "respond.toRecord", action: "Respond to recording" },
+        { name: "Respond To Auth", value: "respond.toAuth", action: "Respond to auth" },
+        { name: "Respond To AI Tool", value: "respond.toAiTool", action: "Respond to AI tool" },
       ],
     },
 
@@ -221,14 +317,14 @@ export function buildActionNodeProperties(): UiProperty[] {
         description: "Optional explicit websocket AI leg override. If empty, the action resolves aiLegId first, then legId, from the current item.",
       },
     ]),
-    { displayName: "Action", name: "recordingControlAction", type: "options", default: OPTION_DEFAULTS.call.recordingControlAction, displayOptions: { show: { resource: ["call"], operation: ["call.controlRecording"] } }, options: [{ name: "Pause", value: "pause" }, { name: "Resume", value: "resume" }] },
+    { displayName: "Action", name: "recordingControlAction", type: "options", default: OPTION_DEFAULTS.call.recordingControlAction, displayOptions: { show: { resource: ["recording"], operation: ["recording.control"] } }, options: [{ name: "Pause", value: "pause" }, { name: "Resume", value: "resume" }] },
     {
       displayName: "Overall Timeout (Seconds)",
       name: "timeoutSeconds",
       type: "number",
       default: OPTION_DEFAULTS.call.waitTimeoutSeconds,
       description: "Maximum total wait time before the action takes the Timeout branch.",
-      displayOptions: { show: { resource: ["call"], operation: ["call.waitCallEvent"] } },
+      displayOptions: { show: { resource: ["call"], operation: ["call.wait"] } },
     },
     {
       displayName: "DTMF Rules",
@@ -236,7 +332,7 @@ export function buildActionNodeProperties(): UiProperty[] {
       type: "fixedCollection",
       typeOptions: { multipleValues: true },
       default: {},
-      displayOptions: { show: { resource: ["call"], operation: ["call.waitCallEvent"] } },
+      displayOptions: { show: { resource: ["call"], operation: ["call.wait"] } },
       options: [
         {
           name: "item",
@@ -248,15 +344,15 @@ export function buildActionNodeProperties(): UiProperty[] {
         },
       ],
     },
-    { displayName: "DTMF Fallback", name: "waitDtmfFallbackEnabled", type: "boolean", default: OPTION_DEFAULTS.call.waitDtmfFallbackEnabled, displayOptions: { show: { resource: ["call"], operation: ["call.waitCallEvent"] } } },
-    { displayName: "Multi-Digit DTMF Fallback", name: "waitDtmfMultiDigitFallbackEnabled", type: "boolean", default: false, displayOptions: { show: { resource: ["call"], operation: ["call.waitCallEvent"], waitDtmfFallbackEnabled: [true] } } },
+    { displayName: "DTMF Fallback", name: "waitDtmfFallbackEnabled", type: "boolean", default: OPTION_DEFAULTS.call.waitDtmfFallbackEnabled, displayOptions: { show: { resource: ["call"], operation: ["call.wait"] } } },
+    { displayName: "Multi-Digit DTMF Fallback", name: "waitDtmfMultiDigitFallbackEnabled", type: "boolean", default: false, displayOptions: { show: { resource: ["call"], operation: ["call.wait"], waitDtmfFallbackEnabled: [true] } } },
     {
       displayName: "Terminator Digit",
       name: "dtmfTerminatorDigit",
       type: "string",
       default: OPTION_DEFAULTS.call.dtmfTerminatorDigit,
       description: "Single DTMF digit that ends multi-digit fallback capture. If empty, fallback capture ends only when the interdigit timeout expires.",
-      displayOptions: { show: { resource: ["call"], operation: ["call.waitCallEvent"], waitDtmfFallbackEnabled: [true], waitDtmfMultiDigitFallbackEnabled: [true] } },
+      displayOptions: { show: { resource: ["call"], operation: ["call.wait"], waitDtmfFallbackEnabled: [true], waitDtmfMultiDigitFallbackEnabled: [true] } },
     },
     {
       displayName: "Leg IDs",
@@ -265,7 +361,7 @@ export function buildActionNodeProperties(): UiProperty[] {
       typeOptions: { multipleValues: true },
       default: {},
       description: "Optional explicit wait target list. If empty, the node waits for the input legId, then input sipPbx.legId.",
-      displayOptions: { show: { resource: ["call"], operation: ["call.waitCallEvent"] } },
+      displayOptions: { show: { resource: ["call"], operation: ["call.wait"] } },
       options: [
         {
           name: "item",
@@ -290,10 +386,10 @@ export function buildActionNodeProperties(): UiProperty[] {
         ],
       },
     ]),
-    buildAddOptionsCollectionProperty("callOptions", { resource: ["call"], operation: ["call.waitCallEvent"] }, [
+    buildAddOptionsCollectionProperty("callOptions", { resource: ["call"], operation: ["call.wait"] }, [
       { displayName: "Interdigit Timeout (Seconds)", name: "interdigitTimeoutSeconds", type: "number", default: OPTION_DEFAULTS.call.interdigitTimeoutSeconds },
     ]),
-    buildAddOptionsCollectionProperty("callOptions", { resource: ["call"], operation: ["call.ringing", "call.answer", "call.hangup", "call.unbridge", "call.controlRecording"] }, [buildIdOption("Leg ID", "legId")]),
+    buildAddOptionsCollectionProperty("callOptions", { resource: ["call"], operation: ["call.ringing", "call.answer", "call.hangup", "call.unbridge"] }, [buildIdOption("Leg ID", "legId")]),
 
     {
       displayName: "Mode",
@@ -337,13 +433,13 @@ export function buildActionNodeProperties(): UiProperty[] {
       ],
     },
     ...buildWebSocketDialProfileOptionCollections({ resource: ["dial"], operation: ["dial.make"], callMode: ["websocket"] }),
-    { displayName: "Overall Timeout (Seconds)", name: "dialTimeoutSeconds", type: "number", default: OPTION_DEFAULTS.dial.waitTimeoutSeconds, displayOptions: { show: { resource: ["dial"], operation: ["dial.waitDialEvent"] } } },
+    { displayName: "Overall Timeout (Seconds)", name: "dialTimeoutSeconds", type: "number", default: OPTION_DEFAULTS.dial.waitTimeoutSeconds, displayOptions: { show: { resource: ["dial"], operation: ["dial.wait"] } } },
     {
       displayName: "Additional Outputs",
       name: "waitEventOutputs",
       type: "multiOptions",
       default: [...OPTION_DEFAULTS.dial.waitEventOutputs],
-      displayOptions: { show: { resource: ["dial"], operation: ["dial.waitDialEvent"] } },
+      displayOptions: { show: { resource: ["dial"], operation: ["dial.wait"] } },
       options: [
         { name: "Ringing", value: "ringing" },
         { name: "Progress", value: "progress" },
@@ -357,7 +453,7 @@ export function buildActionNodeProperties(): UiProperty[] {
       typeOptions: { multipleValues: true },
       default: {},
       description: "Optional explicit wait target list. If empty, the node waits for the input dialId, then input sipPbx.dialId.",
-      displayOptions: { show: { resource: ["dial"], operation: ["dial.waitDialEvent"] } },
+      displayOptions: { show: { resource: ["dial"], operation: ["dial.wait"] } },
       options: [
         {
           name: "item",
@@ -458,18 +554,15 @@ export function buildActionNodeProperties(): UiProperty[] {
       required: true,
       displayOptions: { show: { resource: ["media"], operation: ["media.recordAudio"], recordOutputType: ["http"], recordHttpAuthentication: ["genericCredentialType"] } },
     },
-    { displayName: "Record the call", name: "active", type: "boolean", default: true, description: "When enabled, starts global recording for the active leg. When disabled, the workflow skips this recording request.", displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToRecord"] } } },
-    { displayName: "File Path", name: "recordFilePath", type: "string", default: "", required: true, description: RECORD_FILE_PATH_HINT, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToRecord"], active: [true] } } },
-    { displayName: "File Format", name: "recordFileFormat", type: "options", default: OPTION_DEFAULTS.recordAudio.fileFormat, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToRecord"], active: [true] } }, options: [{ name: "WAV", value: "wav" }, { name: "MP3", value: "mp3" }, { name: "Opus", value: "opus" }, { name: "OGG", value: "ogg" }] },
-    { displayName: "Split Channels", name: "recordSplitChannels", type: "boolean", default: OPTION_DEFAULTS.autoRecording.splitChannels, description: "When enabled, call recording writes inbound audio to channel 1 and outbound PBX audio to channel 2.", displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToRecord"], active: [true] } } },
-    { displayName: "Wait For Recording Completion", name: "waitForRecordingCompletion", type: "boolean", default: OPTION_DEFAULTS.autoRecording.waitForCompletion, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToRecord"], active: [true] } } },
+    ...buildGlobalRecordingPrimaryProperties({ resource: ["recording"], operation: ["recording.start"] }, false),
+    ...buildGlobalRecordingPrimaryProperties({ resource: ["respond"], operation: ["respond.toRecord"] }, true),
     {
       displayName: "Action",
       name: "authAction",
       type: "options",
       default: OPTION_DEFAULTS.extensionsAction.authAction,
       required: true,
-      displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToAuth"] } },
+      displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"] } },
       options: [
         { name: "Allow", value: "allow" },
         { name: "Verify Digest Password", value: "verify_password" },
@@ -478,10 +571,10 @@ export function buildActionNodeProperties(): UiProperty[] {
         { name: "Deny", value: "deny" },
       ],
     },
-    { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToAuth"], authAction: ["verify_password"] } } },
-    { displayName: "Extension", name: "extension", type: "string", default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToAuth"], authAction: ["verify_password", "allow"] } } },
-    { displayName: "Status Code", name: "statusCode", type: "number", default: OPTION_DEFAULTS.extensionsAction.statusCode, required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToAuth"], authAction: ["challenge", "deny"] } } },
-    { displayName: "Reason", name: "reason", type: "string", default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToAuth"], authAction: ["deny"] } } },
+    { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["verify_password"] } } },
+    { displayName: "Extension", name: "extension", type: "string", default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["verify_password", "allow"] } } },
+    { displayName: "Status Code", name: "statusCode", type: "number", default: OPTION_DEFAULTS.extensionsAction.statusCode, required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["challenge", "deny"] } } },
+    { displayName: "Reason", name: "reason", type: "string", default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["deny"] } } },
     {
       displayName: "Response Text",
       name: "outputText",
@@ -489,9 +582,9 @@ export function buildActionNodeProperties(): UiProperty[] {
       default: "",
       required: true,
       description: "Text returned to the AI model as the function result.",
-      displayOptions: { show: { resource: ["respond"], operation: ["respond.respondToAiTool"] } },
+      displayOptions: { show: { resource: ["respond"], operation: ["respond.toAiTool"] } },
     },
-    buildAddOptionsCollectionProperty("respondOptions", { resource: ["respond"], operation: ["respond.respondToAuth", "respond.respondToAiTool"] }, [buildIdOption("Request ID", "requestId")]),
+    buildAddOptionsCollectionProperty("respondOptions", { resource: ["respond"], operation: ["respond.toAuth", "respond.toAiTool"] }, [buildIdOption("Request ID", "requestId")]),
     { displayName: "Target", name: "stopMediaTarget", type: "options", default: OPTION_DEFAULTS.stopMedia.target, required: true, displayOptions: { show: { resource: ["media"], operation: ["media.stopMedia"] } }, options: [{ name: "Media ID", value: "mediaId" }, { name: "Leg ID", value: "legId" }] },
     buildAddOptionsCollectionProperty("mediaOptions", { resource: ["media"], operation: ["media.stopMedia"], stopMediaTarget: ["mediaId"] }, [
       buildIdOption("Media ID", "mediaId"),
@@ -501,7 +594,7 @@ export function buildActionNodeProperties(): UiProperty[] {
       buildIdOption("Leg ID", "legId"),
       { displayName: "Reason", name: "stopMediaReason", type: "string", default: OPTION_DEFAULTS.stopMedia.reason },
     ]),
-    { displayName: "Timeout (Seconds)", name: "waitMediaTimeoutSeconds", type: "number", default: OPTION_DEFAULTS.waitMedia.timeoutSeconds, displayOptions: { show: { resource: ["media"], operation: ["media.waitMedia"] } } },
+    { displayName: "Timeout (Seconds)", name: "waitMediaTimeoutSeconds", type: "number", default: OPTION_DEFAULTS.waitMedia.timeoutSeconds, displayOptions: { show: { resource: ["media"], operation: ["media.wait"] } } },
     {
       displayName: "Media IDs",
       name: "waitMediaIds",
@@ -509,7 +602,7 @@ export function buildActionNodeProperties(): UiProperty[] {
       typeOptions: { multipleValues: true },
       default: {},
       description: "Optional explicit wait target list. If empty, the node waits for the input mediaId, then input sipPbx.mediaId.",
-      displayOptions: { show: { resource: ["media"], operation: ["media.waitMedia"] } },
+      displayOptions: { show: { resource: ["media"], operation: ["media.wait"] } },
       options: [
         {
           name: "item",
@@ -643,9 +736,9 @@ export function buildActionNodeProperties(): UiProperty[] {
       { displayName: "Duration (ms)", name: "dtmfDurationMs", type: "number", default: OPTION_DEFAULTS.sendDtmf.durationMs },
       { displayName: "Gap (ms)", name: "dtmfGapMs", type: "number", default: OPTION_DEFAULTS.sendDtmf.gapMs },
     ]),
-    { displayName: "Target", name: "queueStatsTarget", type: "options", default: OPTION_DEFAULTS.queueAction.statsTarget, required: true, displayOptions: { show: { resource: ["queue"], operation: ["queue.getQueueStats"] } }, options: [{ name: "Queue Ref", value: "ref" }, { name: "Leg ID", value: "legId" }] },
-    { displayName: "Queue Ref", name: "ref", type: "string", default: "", required: true, displayOptions: { show: { resource: ["queue"], operation: ["queue.enqueueLeg", "queue.getQueueStats"] }, hide: { queueStatsTarget: ["legId"] } } },
-    buildAddOptionsCollectionProperty("queueOptions", { resource: ["queue"], operation: ["queue.enqueueLeg"] }, [
+    { displayName: "Target", name: "queueStatsTarget", type: "options", default: OPTION_DEFAULTS.queueAction.statsTarget, required: true, displayOptions: { show: { resource: ["queue"], operation: ["queue.getStats"] } }, options: [{ name: "Queue Ref", value: "ref" }, { name: "Leg ID", value: "legId" }] },
+    { displayName: "Queue Ref", name: "ref", type: "string", default: "", required: true, displayOptions: { show: { resource: ["queue"], operation: ["queue.putLeg", "queue.getStats"] }, hide: { queueStatsTarget: ["legId"] } } },
+    buildAddOptionsCollectionProperty("queueOptions", { resource: ["queue"], operation: ["queue.putLeg"] }, [
       buildIdOption("Leg ID", "legId"),
       { displayName: "Placement", name: "queuePlacement", type: "options", default: OPTION_DEFAULTS.queueAction.placement, options: [{ name: "Back", value: "back" }, { name: "Front", value: "front" }] },
       {
@@ -677,20 +770,12 @@ export function buildActionNodeProperties(): UiProperty[] {
       type: "boolean",
       default: true,
       description: "If enabled, when the caller hangs up the entry switches to callback mode and the next Dispatch arrives with mode=callback. If disabled, hanging up removes the entry from the queue.",
-      displayOptions: { show: { resource: ["queue"], operation: ["queue.setQueueCallback"] } },
+      displayOptions: { show: { resource: ["queue"], operation: ["queue.setCallback"] } },
     },
-    buildAddOptionsCollectionProperty("queueOptions", { resource: ["queue"], operation: ["queue.setQueueCallback"] }, [buildIdOption("Leg ID", "legId")]),
-    buildAddOptionsCollectionProperty("queueOptions", { resource: ["queue"], operation: ["queue.getQueueStats"], queueStatsTarget: ["legId"] }, [buildIdOption("Leg ID", "legId")]),
-    buildAddOptionsCollectionProperty("respondOptions", { resource: ["respond"], operation: ["respond.respondToRecord"], active: [false] }, [buildIdOption("Request ID", "requestId")]),
-    buildAddOptionsCollectionProperty("respondOptions", { resource: ["respond"], operation: ["respond.respondToRecord"], active: [true], recordFileFormat: ["wav"] }, [
-      buildIdOption("Request ID", "requestId"),
-      { displayName: "WAV Sample Rate", name: "recordWavSampleRate", type: "number", default: OPTION_DEFAULTS.recordAudio.wavSampleRate },
-      { displayName: "WAV Bit Depth", name: "recordWavBitDepth", type: "number", default: OPTION_DEFAULTS.recordAudio.wavBitDepth },
-    ]),
-    buildAddOptionsCollectionProperty("respondOptions", { resource: ["respond"], operation: ["respond.respondToRecord"], active: [true], recordFileFormat: ["mp3", "opus", "ogg"] }, [
-      buildIdOption("Request ID", "requestId"),
-      { displayName: "Compressed Sample Rate", name: "recordCompressedSampleRate", type: "number", default: OPTION_DEFAULTS.recordAudio.compressedSampleRate },
-      { displayName: "Compressed Bitrate", name: "recordCompressedBitrate", type: "number", default: OPTION_DEFAULTS.recordAudio.compressedBitrateKbps },
-    ]),
+    buildAddOptionsCollectionProperty("queueOptions", { resource: ["queue"], operation: ["queue.setCallback"] }, [buildIdOption("Leg ID", "legId")]),
+    buildAddOptionsCollectionProperty("queueOptions", { resource: ["queue"], operation: ["queue.getStats"], queueStatsTarget: ["legId"] }, [buildIdOption("Leg ID", "legId")]),
+    buildAddOptionsCollectionProperty("recordingOptions", { resource: ["recording"], operation: ["recording.control"] }, [buildIdOption("Leg ID", "legId")]),
+    ...buildGlobalRecordingOptionsCollections("recordingOptions", { resource: ["recording"], operation: ["recording.start"] }, buildIdOption("Leg ID", "legId"), false),
+    ...buildGlobalRecordingOptionsCollections("respondOptions", { resource: ["respond"], operation: ["respond.toRecord"] }, buildIdOption("Request ID", "requestId"), true),
   ];
 }

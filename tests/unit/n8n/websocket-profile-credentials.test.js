@@ -867,7 +867,7 @@ test("AI invokeTool action description is tool-only and AI tool trigger descript
   assert.match(String(actionDescription.outputs || ""), /operation === "ai\.invokeAiTool"[\s\S]*type:\s*"ai_tool"/);
   assert.match(String(triggerDescription.outputs || ""), /triggerOn === "aiTool"[\s\S]*displayName:\s*"Request"/);
   assert.ok(resourceProperty);
-  assert.deepStrictEqual(resourceProperty.options.map((entry) => entry.value), ["call", "dial", "media", "queue", "ai", "respond"]);
+  assert.deepStrictEqual(resourceProperty.options.map((entry) => entry.value), ["call", "dial", "media", "queue", "recording", "ai", "respond"]);
   const aiOperationProperty = actionProperties.find((entry) =>
     entry
     && entry.name === "operation"

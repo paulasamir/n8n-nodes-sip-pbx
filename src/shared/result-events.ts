@@ -9,8 +9,6 @@
  * producer and consumer.
  */
 
-// === Media operation status / eventType ===================================
-
 export const MEDIA_EVENT_STARTED = "started" as const;
 export const MEDIA_EVENT_COMPLETED = "completed" as const;
 export const MEDIA_EVENT_INTERRUPTED = "interrupted" as const;
@@ -24,8 +22,6 @@ export const MEDIA_EVENTS = [
   MEDIA_EVENT_FAILED,
 ] as const;
 export type MediaEventType = (typeof MEDIA_EVENTS)[number];
-
-// === Dial wait eventType ==================================================
 
 export const DIAL_EVENT_RINGING = "ringing" as const;
 export const DIAL_EVENT_PROGRESS = "progress" as const;
@@ -43,8 +39,6 @@ export const DIAL_EVENTS = [
 ] as const;
 export type DialEventType = (typeof DIAL_EVENTS)[number];
 
-// === Call wait event eventType ============================================
-
 export const CALL_EVENT_DTMF = "dtmf" as const;
 export const CALL_EVENT_INTERRUPT = "interrupt" as const;
 export const CALL_EVENT_ENDED = "ended" as const;
@@ -56,8 +50,6 @@ export const CALL_EVENTS = [
   CALL_EVENT_TIMEOUT,
 ] as const;
 export type CallEventType = (typeof CALL_EVENTS)[number];
-
-// === Call wait result output ==============================================
 
 export const CALL_WAIT_OUTPUT_MATCHED = "matched" as const;
 export const CALL_WAIT_OUTPUT_DTMF_FALLBACK = "dtmfFallback" as const;
@@ -73,12 +65,11 @@ export const CALL_WAIT_OUTPUTS = [
 ] as const;
 export type CallWaitOutput = (typeof CALL_WAIT_OUTPUTS)[number];
 
-// === Internal status enums (daemon-side, but exported for cross-cutting use) ===
-//
-// These belong to the daemon's domain (Leg.status, Dial.status, Media.status)
-// but several callers compare against literal values; promoting them to
-// constants keeps "stringly-typed" comparisons typo-safe.
-
+/**
+ * These belong to the daemon's domain (Leg.status, Dial.status, Media.status)
+ * but several callers compare against literal values; promoting them to
+ * constants keeps "stringly-typed" comparisons typo-safe.
+ */
 export const LEG_STATUS_CREATED = "created" as const;
 export const LEG_STATUS_RINGING = "ringing" as const;
 export const LEG_STATUS_ANSWERED = "answered" as const;
@@ -106,8 +97,6 @@ export type DialStatusName =
   | typeof DIAL_STATUS_REJECTED
   | typeof DIAL_STATUS_FAILED
   | typeof DIAL_STATUS_TIMEOUT;
-
-// === Dial wait UI selection values (waitEventOutputs multi-select) ========
 
 export const DIAL_WAIT_SELECTION_RINGING = "ringing" as const;
 export const DIAL_WAIT_SELECTION_PROGRESS = "progress" as const;

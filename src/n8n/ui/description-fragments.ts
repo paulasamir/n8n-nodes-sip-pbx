@@ -33,7 +33,8 @@ const RECORDING_FILE_PATH_TEMPLATE_VARIABLES = [
   "from",
   "caller",
   "to",
-  "called",
+  "calledNumber",
+  "calledName",
   "callerName",
   "extension",
 ] as const;
@@ -148,6 +149,67 @@ export function buildAddOptionsCollectionProperty(
     displayOptions: { show },
     options,
   };
+}
+
+export function buildSipListenerOptionEntries(scope: "trunk" | "extensions"): UiProperty[] {
+  const sharedOptions = [
+    {
+      displayName: "Local Bind Port",
+      name: "localBindPort",
+      type: "number",
+      default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
+    },
+    {
+      displayName: "TLS Bind Port",
+      name: "tlsBindPort",
+      type: "number",
+      default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
+    },
+    {
+      displayName: "Local Bind IP",
+      name: "localBindIp",
+      type: "string",
+      default: "",
+    },
+    {
+      displayName: "Advertised IP",
+      name: "advertisedIp",
+      type: "string",
+      default: "",
+    },
+    {
+      displayName: "Realm",
+      name: "realm",
+      type: "string",
+      default: "",
+    },
+  ];
+  if (scope === "extensions") {
+    return [
+      {
+        displayName: "Transport",
+        name: "transports",
+        type: "multiOptions",
+        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
+        options: [
+          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
+        ],
+      },
+      ...sharedOptions,
+    ];
+  }
+  return [
+    {
+      displayName: "Transport",
+      name: "transport",
+      type: "options",
+      default: OPTION_DEFAULTS.sip.transport,
+      options: [
+        { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
+      ],
+    },
+    ...sharedOptions,
+  ];
 }
 
 export function buildIdOption(displayName: string, name: "legId" | "dialId" | "mediaId" | "requestId"): UiProperty {

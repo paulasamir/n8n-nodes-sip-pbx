@@ -12,29 +12,13 @@ import {
 import { readCollectionOptions, readFixedCollectionItems, readStringParameter } from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem, normalizePublicRawObject } from "../shared/output-builders";
 
-function extractSipUser(value: unknown): string {
-  const raw = String(value || "").trim();
-  if (!raw) {
-    return "";
-  }
-  const uriMatch = raw.match(/<([^>]+)>/);
-  const uri = String(uriMatch ? uriMatch[1] : raw).trim();
-  const sipMatch = uri.match(/^sips?:([^@;>]+)/i);
-  if (sipMatch) {
-    return decodeURIComponent(String(sipMatch[1] || "").trim());
-  }
-  const atIndex = uri.indexOf("@");
-  if (atIndex > 0) {
-    return uri.slice(0, atIndex).trim();
-  }
-  return uri;
-}
+import { extractSipDisplayName, extractSipUser } from "../shared/sip-address";
 
 function readExtensionsTransportSet(options: Record<string, unknown>): string[] {
-  if (!Object.prototype.hasOwnProperty.call(options, "extensionTransports")) {
+  if (!Object.prototype.hasOwnProperty.call(options, "transports")) {
     return [...OPTION_DEFAULTS.trigger.extensions.transports];
   }
-  const raw = options.extensionTransports;
+  const raw = options.transports;
   if (Array.isArray(raw)) {
     return raw
       .map((value) => String(value || "").trim().toLowerCase())
@@ -52,27 +36,27 @@ export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime):
   const authMode = readStringParameter(node, "authMode", 0, OPTION_DEFAULTS.trigger.extensions.authMode);
   const extensionsEnableCallRecording = Boolean(node.getNodeParameter?.("extensionsEnableCallRecording", 0, OPTION_DEFAULTS.trigger.extensions.enableCallRecording));
   const options = readCollectionOptions(node, "extensionsOptions", 0);
-  const extensionTransports = readExtensionsTransportSet(options);
-  if (extensionTransports.length === 0) {
+  const transports = readExtensionsTransportSet(options);
+  if (transports.length === 0) {
     throw new Error("At least one extensions transport must be selected");
   }
   const hasAuthBranch = authMode !== "static";
   const hasRecordBranch = extensionsEnableCallRecording;
   const config: Record<string, unknown> = {
     ref,
-    transport: extensionTransports[0] || OPTION_DEFAULTS.sip.transport,
-    extensionTransports: extensionTransports.length > 0 ? extensionTransports : [...OPTION_DEFAULTS.trigger.extensions.transports],
-    extensionsLocalBindIp: String(options.extensionsLocalBindIp || "").trim(),
-    extensionsLocalBindPort: (() => {
-      const raw = options.extensionsLocalBindPort;
+    transport: transports[0] || OPTION_DEFAULTS.sip.transport,
+    transports: transports.length > 0 ? transports : [...OPTION_DEFAULTS.trigger.extensions.transports],
+    localBindIp: String(options.localBindIp || "").trim(),
+    localBindPort: (() => {
+      const raw = options.localBindPort;
       if (raw == null || raw === "") {
         return OPTION_DEFAULTS.trigger.extensions.localBindPort;
       }
       const numeric = Number(raw);
       return Number.isFinite(numeric) ? numeric : OPTION_DEFAULTS.trigger.extensions.localBindPort;
     })(),
-    extensionsTlsBindPort: (() => {
-      const raw = options.extensionsTlsBindPort;
+    tlsBindPort: (() => {
+      const raw = options.tlsBindPort;
       if (raw == null || raw === "") {
         return OPTION_DEFAULTS.trigger.extensions.tlsBindPort;
       }
@@ -169,7 +153,8 @@ export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime):
           callerNumber: extractSipUser(payload.from),
           callerName: String(payload.callerName || ""),
           to: String(payload.to || ""),
-          called: extractSipUser(payload.to),
+          calledNumber: extractSipUser(payload.to),
+          calledName: extractSipDisplayName(payload.to),
         }, {
           ref: String(payload.ref || ""),
           legId: String(payload.legId || "") || undefined,
@@ -195,7 +180,8 @@ export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime):
         callerNumber: extractSipUser(payload.from),
         callerName: String(payload.callerName || ""),
         to: String(payload.to || ""),
-        called: extractSipUser(payload.to),
+        calledNumber: extractSipUser(payload.to),
+        calledName: extractSipDisplayName(payload.to),
         raw: normalizePublicRawObject({
           callId: String(payload.callId || ""),
           extension: String(payload.extension || ""),

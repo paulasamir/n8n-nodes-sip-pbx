@@ -77,7 +77,7 @@ export async function executeWaitLegEvent(
 
 export async function executeControlRecording(node: any, runtime: PbxRuntime, item: any, index: number): Promise<any> {
   return await runtime.controlRecording(
-    requireActionValue("legId", resolveLegId(node, item, index)),
+    requireActionValue("legId", resolveLegId(node, item, index, "legId", "recordingOptions")),
     readStringParameter(node, "recordingControlAction", index, OPTION_DEFAULTS.call.recordingControlAction) as "pause" | "resume",
   );
 }

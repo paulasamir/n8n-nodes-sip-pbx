@@ -917,6 +917,7 @@ async function main() {
 
     const authRequest = daemon.authService.createRequest({
       triggerKey: "wf:ext-trigger",
+      triggerKind: "extensions",
       ref: "office-ext",
       requestContext: {
         requestType: "register",
@@ -932,7 +933,7 @@ async function main() {
     const authResponse = await daemon.dispatchUnary(new RequestContext(), {
       method: ControllerMethod.executeAction,
       params: {
-        operation: "respond.respondToAuth",
+        operation: "respond.toAuth",
         authRequestId: authRequest.authRequestId,
         authAction: "allow",
       },
@@ -941,6 +942,7 @@ async function main() {
 
     const timedAuthRequest = daemon.authService.createRequest({
       triggerKey: "wf:ext-trigger",
+      triggerKind: "extensions",
       ref: "office-ext",
       timeout: 10,
       requestContext: {
@@ -954,7 +956,7 @@ async function main() {
       daemon.dispatchUnary(new RequestContext(), {
       method: ControllerMethod.executeAction,
       params: {
-        operation: "respond.respondToAuth",
+        operation: "respond.toAuth",
         authRequestId: timedAuthRequest.authRequestId,
         authAction: "allow",
       },

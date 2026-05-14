@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-test("call.waitCallEvent request cancellation releases wait retention without ending the leg", async () => {
+test("call.wait request cancellation releases wait retention without ending the leg", async () => {
   const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
   const { RequestContext } = require("../../../build-src/daemon/core/request-context.js");
   const { ControllerMethod } = require("../../../build-src/control/controller-protocol.js");
@@ -20,7 +20,7 @@ test("call.waitCallEvent request cancellation releases wait retention without en
     const waitPromise = daemon.dispatchUnary(context, {
       method: ControllerMethod.executeAction,
       params: {
-        operation: "call.waitCallEvent",
+        operation: "call.wait",
         legId: leg.legId,
         timeoutSeconds: 5,
         rules: [],
@@ -47,7 +47,7 @@ test("call.waitCallEvent request cancellation releases wait retention without en
   }
 });
 
-test("call.waitCallEvent treats timeoutSeconds=0 as immediate overall timeout", async () => {
+test("call.wait treats timeoutSeconds=0 as immediate overall timeout", async () => {
   const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
   const { RequestContext } = require("../../../build-src/daemon/core/request-context.js");
   const { ControllerMethod } = require("../../../build-src/control/controller-protocol.js");
@@ -64,7 +64,7 @@ test("call.waitCallEvent treats timeoutSeconds=0 as immediate overall timeout", 
     const result = await daemon.dispatchUnary(context, {
       method: ControllerMethod.executeAction,
       params: {
-        operation: "call.waitCallEvent",
+        operation: "call.wait",
         legId: leg.legId,
         timeoutSeconds: 0,
         rules: [{ pattern: "1", label: "Callback on" }],
@@ -82,7 +82,7 @@ test("call.waitCallEvent treats timeoutSeconds=0 as immediate overall timeout", 
   }
 });
 
-test("dial.waitDialEvent request cancellation releases wait retention without adding any extra dial owner", async () => {
+test("dial.wait request cancellation releases wait retention without adding any extra dial owner", async () => {
   const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
   const { RequestContext } = require("../../../build-src/daemon/core/request-context.js");
   const { ControllerMethod } = require("../../../build-src/control/controller-protocol.js");
@@ -100,7 +100,7 @@ test("dial.waitDialEvent request cancellation releases wait retention without ad
     const waitPromise = daemon.dispatchUnary(context, {
       method: ControllerMethod.executeAction,
       params: {
-        operation: "dial.waitDialEvent",
+        operation: "dial.wait",
         dialId: dial.dialId,
         dialTimeoutSeconds: 5,
         waitEventOutputs: [],
@@ -124,7 +124,7 @@ test("dial.waitDialEvent request cancellation releases wait retention without ad
   }
 });
 
-test("dial.waitDialEvent resolves answered without re-looking up a finalized dial in finally", async () => {
+test("dial.wait resolves answered without re-looking up a finalized dial in finally", async () => {
   const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
   const { RequestContext } = require("../../../build-src/daemon/core/request-context.js");
   const { ControllerMethod } = require("../../../build-src/control/controller-protocol.js");
@@ -143,7 +143,7 @@ test("dial.waitDialEvent resolves answered without re-looking up a finalized dia
     const waitPromise = daemon.dispatchUnary(context, {
       method: ControllerMethod.executeAction,
       params: {
-        operation: "dial.waitDialEvent",
+        operation: "dial.wait",
         dialId: dial.dialId,
         dialTimeoutSeconds: 5,
         waitEventOutputs: [],

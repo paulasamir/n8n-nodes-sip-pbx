@@ -82,7 +82,7 @@ export class PbxRuntime {
 
   async waitForLegEvent(legIdOrLegIds: string | string[], options?: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "call.waitCallEvent",
+      operation: "call.wait",
       ...(Array.isArray(legIdOrLegIds) ? { legIds: legIdOrLegIds } : { legId: legIdOrLegIds }),
       ...(options || {}),
     });
@@ -90,9 +90,16 @@ export class PbxRuntime {
 
   async controlRecording(legId: string, recordingControlAction: "pause" | "resume"): Promise<any> {
     return await this.executeAction({
-      operation: "call.controlRecording",
+      operation: "recording.control",
       legId,
       recordingControlAction,
+    });
+  }
+
+  async startGlobalRecording(input: Record<string, unknown>): Promise<any> {
+    return await this.executeAction({
+      operation: "recording.start",
+      ...(input || {}),
     });
   }
 
@@ -113,7 +120,7 @@ export class PbxRuntime {
 
   async waitForDialEvent(dialIdOrDialIds: string | string[], options?: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "dial.waitDialEvent",
+      operation: "dial.wait",
       ...(Array.isArray(dialIdOrDialIds) ? { dialIds: dialIdOrDialIds } : { dialId: dialIdOrDialIds }),
       ...(options || {}),
     });
@@ -152,7 +159,7 @@ export class PbxRuntime {
 
   async waitMedia(input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "media.waitMedia",
+      operation: "media.wait",
       ...(input || {}),
     });
   }
@@ -168,14 +175,14 @@ export class PbxRuntime {
 
   async respondToAuth(input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "respond.respondToAuth",
+      operation: "respond.toAuth",
       ...(input || {}),
     });
   }
 
   async respondToRecord(input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "respond.respondToRecord",
+      operation: "respond.toRecord",
       ...(input || {}),
     });
   }
@@ -186,7 +193,7 @@ export class PbxRuntime {
     input?: { queuePlacement?: "front" | "back" } & Record<string, unknown>,
   ): Promise<any> {
     return await this.executeAction({
-      operation: "queue.enqueueLeg",
+      operation: "queue.putLeg",
       ref,
       legId,
       queuePlacement: String(input?.queuePlacement || "").trim() || OPTION_DEFAULTS.queueAction.placement,
@@ -196,7 +203,7 @@ export class PbxRuntime {
 
   async setQueueCallback(legId: string, callbackEnabled: boolean): Promise<any> {
     return await this.executeAction({
-      operation: "queue.setQueueCallback",
+      operation: "queue.setCallback",
       legId,
       callbackEnabled,
     });
@@ -204,14 +211,14 @@ export class PbxRuntime {
 
   async respondToAiTool(input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "respond.respondToAiTool",
+      operation: "respond.toAiTool",
       ...(input || {}),
     });
   }
 
   async getQueueStats(input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
-      operation: "queue.getQueueStats",
+      operation: "queue.getStats",
       ...(input || {}),
     });
   }
@@ -345,14 +352,14 @@ export class PbxRuntime {
       }
       return normalized;
     }
-    if (operation === "queue.enqueueLeg") {
+    if (operation === "queue.putLeg") {
       const publicRef = String(normalized.ref || "").trim();
       if (publicRef) {
         normalized.ref = this.scopeFlowRef("queue", publicRef);
       }
       return normalized;
     }
-    if (operation === "queue.getQueueStats" && String(normalized.queueStatsTarget || "").trim() === "ref") {
+    if (operation === "queue.getStats" && String(normalized.queueStatsTarget || "").trim() === "ref") {
       const publicRef = String(normalized.ref || "").trim();
       if (publicRef) {
         normalized.ref = this.scopeFlowRef("queue", publicRef);

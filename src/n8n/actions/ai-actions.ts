@@ -365,11 +365,7 @@ function loadOptionalModuleByFile(file: string | null): Record<string, unknown> 
 }
 
 function loadOptionalLangChainModule(subpath: string): Record<string, unknown> | null {
-  // Try Node's own module resolution first — it handles every hoisting layout
-  // n8n's installer might pick (top-level node_modules, nested, pnpm-style,
-  // etc.) and respects the package's `exports` field automatically. The
-  // custom walker below is a fallback for environments where this package is
-  // loaded from a path that's outside Node's normal resolution roots.
+  // Try Node's resolution first (handles various n8n layouts); custom walker is fallback.
   const moduleId = `@langchain/core/${subpath}`;
   try {
     return require(moduleId) as Record<string, unknown>;
@@ -689,9 +685,7 @@ function tryLoadLangChainMessageConstructors(): LangChainMessageConstructors | n
     cachedLangChainMessageConstructors = false;
     return null;
   }
-  // Try the aggregated `@langchain/core/messages` shape first; fall back to
-  // the per-class subpaths used by newer builds where the top-level export
-  // may not re-export every class symbol.
+  // Try aggregated messages first, then per-class subpaths for newer builds.
   const HumanMessage = pickMessageConstructor(moduleExports, "HumanMessage", "messages/human");
   const AIMessage = pickMessageConstructor(moduleExports, "AIMessage", "messages/ai");
   const ToolMessage = pickMessageConstructor(moduleExports, "ToolMessage", "messages/tool");
@@ -716,9 +710,7 @@ function pickMessageConstructor(
   if (typeof direct === "function") {
     return direct as new (fields: unknown) => unknown;
   }
-  // Some @langchain/core builds split each message class into its own
-  // subpath. The aggregate `messages` re-export may be missing the constructor
-  // we need; try the dedicated subpath as a fallback.
+  // Fall back to dedicated subpaths if aggregated export is missing constructors.
   const fallback = loadOptionalLangChainModule(fallbackSubpath);
   const candidate = fallback?.[exportName];
   return typeof candidate === "function" ? (candidate as new (fields: unknown) => unknown) : null;

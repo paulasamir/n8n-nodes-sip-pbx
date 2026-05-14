@@ -45,7 +45,7 @@ async function testTrunkTriggerNode() {
         callId: "call-trunk-1",
         from: "sip:100@example.test",
         callerName: "Alice",
-        to: "sip:200@example.test",
+        to: "\"Sales\" <sip:200@example.test>",
         headers: {
           "call-id": "call-trunk-1",
           "x-test-header": "yes",
@@ -61,7 +61,7 @@ async function testTrunkTriggerNode() {
           body: "",
         },
       });
-      stream.emit("Record", {
+      stream.emit("Recording", {
         eventType: "record",
         recordRequestId: "record-trunk-1",
         kind: "trunk",
@@ -71,7 +71,7 @@ async function testTrunkTriggerNode() {
         direction: "inbound",
         from: "sip:100@example.test",
         callerName: "Alice",
-        to: "sip:200@example.test",
+        to: "\"Sales\" <sip:200@example.test>",
         extension: "",
       });
       return stream;
@@ -100,7 +100,7 @@ async function testTrunkTriggerNode() {
     Object.assign(node, createTriggerContext({
       triggerOn: "trunk",
       ref: "carrier-a",
-      registerOnStart: true,
+      trunkRegisterMode: "register",
       enableCallRecording: true,
       trunkOptions: {
         registrationExpires: 900,
@@ -128,6 +128,7 @@ async function testTrunkTriggerNode() {
   assert.strictEqual(seen.config.ref, "carrier-a");
   assert.strictEqual(seen.config.sipCredentials.username, "carrier-user");
   assert.deepStrictEqual(seen.config.registerHeaders, [{ name: "X-Test", value: "1" }]);
+  assert.strictEqual(seen.config.trunkRegisterMode, "register");
   assert.strictEqual(seen.config.enableCallRecording, true);
   assert.strictEqual(seen.config.recordResponseTimeoutSeconds, 2.5);
   assert.strictEqual(seen.config.recordingFilePathTemplate, undefined);
@@ -137,7 +138,8 @@ async function testTrunkTriggerNode() {
   assert.strictEqual(emitted[0][0][0].json.eventType, "invite");
   assert.strictEqual(emitted[0][0][0].json.ref, "carrier-a");
   assert.strictEqual(emitted[0][0][0].json.callerNumber, "100");
-  assert.strictEqual(emitted[0][0][0].json.called, "200");
+  assert.strictEqual(emitted[0][0][0].json.calledNumber, "200");
+  assert.strictEqual(emitted[0][0][0].json.calledName, "Sales");
   assert.strictEqual(emitted[0][0][0].json.sipPbx.legId, "leg-trunk-1");
   assert.deepStrictEqual(emitted[0][1], []);
   assert.strictEqual(emitted[1][1][0].json.eventType, "record");
@@ -145,8 +147,9 @@ async function testTrunkTriggerNode() {
   assert.strictEqual(emitted[1][1][0].json.direction, "inbound");
   assert.strictEqual(emitted[1][1][0].json.from, "sip:100@example.test");
   assert.strictEqual(emitted[1][1][0].json.callerNumber, "100");
-  assert.strictEqual(emitted[1][1][0].json.to, "sip:200@example.test");
-  assert.strictEqual(emitted[1][1][0].json.called, "200");
+  assert.strictEqual(emitted[1][1][0].json.to, "\"Sales\" <sip:200@example.test>");
+  assert.strictEqual(emitted[1][1][0].json.calledNumber, "200");
+  assert.strictEqual(emitted[1][1][0].json.calledName, "Sales");
   assert.strictEqual(emitted[1][1][0].json.timestamp, undefined);
   assert.strictEqual(emitted[1][1][0].json.date, undefined);
   assert.strictEqual(emitted[1][1][0].json.time, undefined);
@@ -158,6 +161,84 @@ async function testTrunkTriggerNode() {
   assert.strictEqual(emitted[1][1][0].json.ss, undefined);
   assert.deepStrictEqual(emitted[1][1][0]._sipPbxResponseHandle, { kind: "record", handle: "record-trunk-1" });
   assert.deepStrictEqual(emitted[1][0], []);
+  return { emitted: emitted.length };
+}
+
+async function testTrunkAuthTriggerNode() {
+  const emitted = [];
+  const seen = {};
+  const stream = createFakeStream();
+  const fakeRuntime = {
+    async openTrunkTrigger(config, onEvent) {
+      seen.config = config;
+      stream.onEvent(onEvent);
+      stream.emit("Auth", {
+        authRequestId: "auth-trunk-1",
+        ref: config.ref,
+        requestType: "register",
+        auth: { username: "carrier-user", realm: "carrier.local", nonce: "nonce-1" },
+        remoteIp: "203.0.113.20",
+        remotePort: 5060,
+        transport: "udp",
+        localIp: "0.0.0.0",
+        localPort: 5060,
+        raw: {
+          startLine: "REGISTER sip:carrier.local SIP/2.0",
+          method: "REGISTER",
+          requestUri: "sip:carrier.local",
+          headers: {
+            callId: "auth-trunk-call-1",
+          },
+          body: "",
+        },
+      });
+      return stream;
+    },
+    async closeTriggerStream(kind, input) {
+      assert.strictEqual(kind, "trunk");
+      assert.deepStrictEqual(input, { ref: "carrier-auth" });
+      stream.close();
+    },
+  };
+
+  await withPatchedRuntime(fakeRuntime, sipPbxTriggerModulePath, async ({ SipPbxTrigger }) => {
+    const node = new SipPbxTrigger();
+    Object.assign(node, createTriggerContext({
+      triggerOn: "trunk",
+      ref: "carrier-auth",
+      trunkRegisterMode: "auth",
+      trunkOptions: {
+        authTimeoutSeconds: 7.5,
+        continueTraversalOnAuthReject: true,
+        transport: "udp",
+        localBindIp: "0.0.0.0",
+        localBindPort: 5060,
+        advertisedIp: "203.0.113.21",
+        realm: "carrier.local",
+      },
+    }, {
+      emitted,
+      workflowId: "wf-trunk-auth",
+      nodeName: "Trunk Auth Trigger",
+      nodePosition: [140, 280],
+    }));
+    const activation = await node.trigger();
+    await activation.closeFunction();
+  });
+
+  assert.strictEqual(seen.config.ref, "carrier-auth");
+  assert.strictEqual(seen.config.trunkRegisterMode, "auth");
+  assert.strictEqual(seen.config.authTimeoutSeconds, 7.5);
+  assert.strictEqual(seen.config.continueTraversalOnAuthReject, true);
+  assert.strictEqual(seen.config.realm, "carrier.local");
+  assert.strictEqual("sipCredentials" in seen.config, false);
+  assert.strictEqual(stream.closed, true);
+  assert.strictEqual(emitted.length, 1);
+  assert.deepStrictEqual(emitted[0][0], []);
+  assert.strictEqual(emitted[0][1][0].json.authRequestId, "auth-trunk-1");
+  assert.strictEqual(emitted[0][1][0].json.auth.username, "carrier-user");
+  assert.strictEqual(emitted[0][1][0].json.auth.realm, "carrier.local");
+  assert.deepStrictEqual(emitted[0][1][0]._sipPbxResponseHandle, { kind: "auth", handle: "auth-trunk-1" });
   return { emitted: emitted.length };
 }
 
@@ -177,7 +258,7 @@ async function testExtensionsTriggerNode() {
         extension: "100",
         from: "sip:caller@example.test",
         callerName: "Caller",
-        to: "sip:100@example.test",
+        to: "\"Front Desk\" <sip:100@example.test>",
         headers: {
           "call-id": "call-ext-1",
           "x-ext-header": "ok",
@@ -214,7 +295,7 @@ async function testExtensionsTriggerNode() {
           body: "",
         },
       });
-      stream.emit("Record", {
+      stream.emit("Recording", {
         eventType: "record",
         recordRequestId: "record-1",
         kind: "extensions",
@@ -225,7 +306,7 @@ async function testExtensionsTriggerNode() {
         extension: "100",
         from: "sip:caller@example.test",
         callerName: "Caller",
-        to: "sip:100@example.test",
+        to: "\"Front Desk\" <sip:100@example.test>",
       });
       return stream;
     },
@@ -247,9 +328,9 @@ async function testExtensionsTriggerNode() {
       extensionsOptions: {
         authTimeoutSeconds: 3.5,
         recordResponseTimeoutSeconds: 4.5,
-        extensionTransports: ["udp"],
-        extensionsLocalBindPort: 5060,
-        extensionsLocalBindIp: "0.0.0.0",
+        transports: ["udp"],
+        localBindPort: 5060,
+        localBindIp: "0.0.0.0",
         advertisedIp: "203.0.113.10",
         realm: "office.local",
       },
@@ -273,7 +354,8 @@ async function testExtensionsTriggerNode() {
   assert.strictEqual(emitted[0][0][0].json.sipPbx.legId, "leg-ext-1");
   assert.strictEqual(emitted[0][0][0].json.callId, "call-ext-1");
   assert.strictEqual(emitted[0][0][0].json.callerNumber, "caller");
-  assert.strictEqual(emitted[0][0][0].json.called, "100");
+  assert.strictEqual(emitted[0][0][0].json.calledNumber, "100");
+  assert.strictEqual(emitted[0][0][0].json.calledName, "Front Desk");
   assert.strictEqual(emitted[0][0][0].json.sipPbx.callId, undefined);
   assert.deepStrictEqual(emitted[0][1], []);
   assert.deepStrictEqual(emitted[0][2], []);
@@ -294,8 +376,9 @@ async function testExtensionsTriggerNode() {
   assert.strictEqual(emitted[2][1][0].json.direction, "inbound");
   assert.strictEqual(emitted[2][1][0].json.from, "sip:caller@example.test");
   assert.strictEqual(emitted[2][1][0].json.callerNumber, "caller");
-  assert.strictEqual(emitted[2][1][0].json.to, "sip:100@example.test");
-  assert.strictEqual(emitted[2][1][0].json.called, "100");
+  assert.strictEqual(emitted[2][1][0].json.to, "\"Front Desk\" <sip:100@example.test>");
+  assert.strictEqual(emitted[2][1][0].json.calledNumber, "100");
+  assert.strictEqual(emitted[2][1][0].json.calledName, "Front Desk");
   assert.strictEqual(emitted[2][1][0].json.timestamp, undefined);
   assert.strictEqual(emitted[2][1][0].json.date, undefined);
   assert.strictEqual(emitted[2][1][0].json.time, undefined);
@@ -322,14 +405,22 @@ async function testQueueTriggerNode() {
       stream.emit("Placed", {
         ref: config.ref,
         legId: "leg-queue-1",
+        callerNumber: "+12025550101",
+        callerName: "Bob",
+        trunkRef: "carrier-a",
       });
       stream.emit("Dispatch", {
         ref: config.ref,
         dialId: "dial-queue-1",
+        mode: "live",
+        callerNumber: "+12025550101",
+        callerName: "Bob",
+        trunkRef: "carrier-a",
       });
-      stream.emit("Callback", {
+      stream.emit("Dispatch", {
         ref: config.ref,
         dialId: "dial-queue-2",
+        mode: "callback",
         callerNumber: "+1000000",
         callerName: "Alice",
         trunkRef: "carrier-a",
@@ -337,6 +428,9 @@ async function testQueueTriggerNode() {
       stream.emit("Offline", {
         ref: config.ref,
         mode: "callback",
+        callerNumber: "+1000000",
+        callerName: "Alice",
+        trunkRef: "carrier-a",
       });
       return stream;
     },
@@ -371,25 +465,37 @@ async function testQueueTriggerNode() {
   assert.strictEqual(stream.closed, true);
   assert.strictEqual(emitted.length, 4);
   assert.strictEqual(emitted[0][0][0].json.legId, "leg-queue-1");
+  assert.strictEqual(emitted[0][0][0].json.callerNumber, "+12025550101");
+  assert.strictEqual(emitted[0][0][0].json.callerName, "Bob");
+  assert.strictEqual(emitted[0][0][0].json.trunkRef, "carrier-a");
   assert.strictEqual(emitted[0][0][0].json.eventType, undefined);
   assert.strictEqual(emitted[0][0][0]._sipPbxResponseHandle, undefined);
   assert.strictEqual(emitted[1][1][0].json.dialId, "dial-queue-1");
+  assert.strictEqual(emitted[1][1][0].json.mode, "live");
+  assert.strictEqual(emitted[1][1][0].json.callerNumber, "+12025550101");
+  assert.strictEqual(emitted[1][1][0].json.callerName, "Bob");
+  assert.strictEqual(emitted[1][1][0].json.trunkRef, "carrier-a");
   assert.strictEqual("legId" in emitted[1][1][0].json, false);
   assert.strictEqual("legId" in (emitted[1][1][0].json.sipPbx || {}), false);
   assert.strictEqual(emitted[1][1][0].json.eventType, undefined);
   assert.strictEqual("extensionNumbers" in emitted[1][1][0].json, false);
   assert.strictEqual(emitted[1][1][0]._sipPbxResponseHandle, undefined);
-  assert.strictEqual(emitted[2][2][0].json.eventType, undefined);
-  assert.strictEqual(emitted[2][2][0].json.callerNumber, "+1000000");
-  assert.strictEqual(emitted[2][2][0].json.trunkRef, "carrier-a");
-  assert.strictEqual(emitted[2][2][0].json.dialId, "dial-queue-2");
-  assert.strictEqual("extensionNumbers" in emitted[2][2][0].json, false);
-  assert.strictEqual(emitted[2][2][0]._sipPbxResponseHandle, undefined);
-  assert.strictEqual(emitted[3][3][0].json.sipPbx.ref, "support");
-  assert.strictEqual(emitted[3][3][0].json.mode, "callback");
-  assert.strictEqual("legId" in emitted[3][3][0].json, false);
-  assert.strictEqual("legId" in emitted[3][3][0].json.sipPbx, false);
-  assert.strictEqual(emitted[3][3][0]._sipPbxResponseHandle, undefined);
+  assert.strictEqual(emitted[2][1][0].json.eventType, undefined);
+  assert.strictEqual(emitted[2][1][0].json.mode, "callback");
+  assert.strictEqual(emitted[2][1][0].json.callerNumber, "+1000000");
+  assert.strictEqual(emitted[2][1][0].json.callerName, "Alice");
+  assert.strictEqual(emitted[2][1][0].json.trunkRef, "carrier-a");
+  assert.strictEqual(emitted[2][1][0].json.dialId, "dial-queue-2");
+  assert.strictEqual("extensionNumbers" in emitted[2][1][0].json, false);
+  assert.strictEqual(emitted[2][1][0]._sipPbxResponseHandle, undefined);
+  assert.strictEqual(emitted[3][2][0].json.sipPbx.ref, "support");
+  assert.strictEqual(emitted[3][2][0].json.mode, "callback");
+  assert.strictEqual(emitted[3][2][0].json.callerNumber, "+1000000");
+  assert.strictEqual(emitted[3][2][0].json.callerName, "Alice");
+  assert.strictEqual(emitted[3][2][0].json.trunkRef, "carrier-a");
+  assert.strictEqual("legId" in emitted[3][2][0].json, false);
+  assert.strictEqual("legId" in emitted[3][2][0].json.sipPbx, false);
+  assert.strictEqual(emitted[3][2][0]._sipPbxResponseHandle, undefined);
   return { emitted: emitted.length };
 }
 
@@ -468,7 +574,7 @@ async function testTriggerActivationRollback() {
       ref: "sales",
       authMode: "raw",
       extensionsOptions: {
-        extensionTransports: ["udp"],
+        transports: ["udp"],
       },
     }, {
       workflowId: "wf-rollback",
@@ -608,6 +714,7 @@ async function runTriggerNodeSmokeCases() {
     aiTrigger: await testAiTriggerNode(),
     triggerActivationRollback: await testTriggerActivationRollback(),
     trunkTrigger: await testTrunkTriggerNode(),
+    trunkAuthTrigger: await testTrunkAuthTriggerNode(),
     extensionsTrigger: await testExtensionsTriggerNode(),
     queueTrigger: await testQueueTriggerNode(),
   };

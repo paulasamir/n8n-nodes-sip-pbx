@@ -27,6 +27,15 @@ function createDaemonSocketClosedError(operation: string, socketPath: string, ca
   return error;
 }
 
+function createControllerError(response: ControllerErrorDto): Error {
+  const error = new Error(response.error.message);
+  (error as Error & { code?: string }).code = response.error.code;
+  if (response.error.details !== undefined) {
+    (error as Error & { details?: Record<string, unknown> }).details = response.error.details;
+  }
+  return error;
+}
+
 const daemonStartPromisesBySocketPath = new Map<string, Promise<void>>();
 
 function isControllerErrorResponse(response: ControllerResponseDto): response is ControllerErrorDto {
@@ -61,7 +70,7 @@ export class ControllerClient {
   async call(method: string, params?: Record<string, unknown>): Promise<unknown> {
     const response = await this.request({ method, params });
     if (isControllerErrorResponse(response)) {
-      throw new Error(response.error.message);
+      throw createControllerError(response);
     }
     return response.result;
   }
@@ -100,7 +109,7 @@ export class ControllerClient {
               `[sip-pbx:control] trigger stream socket end failed after error response; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
             );
           }
-          reject(new Error(response.error.message));
+          reject(createControllerError(response));
           return;
         }
         const result = (response.result || {}) as Record<string, unknown>;

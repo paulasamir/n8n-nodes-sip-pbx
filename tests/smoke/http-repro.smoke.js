@@ -533,8 +533,8 @@ async function main() {
     const extensionsStream = await runtime.openExtensionsTrigger({
       ref: "office-http-repro",
       transport: "udp",
-      extensionsLocalBindIp: "127.0.0.1",
-      extensionsLocalBindPort: 0,
+      localBindIp: "127.0.0.1",
+      localBindPort: 0,
       advertisedIp: "127.0.0.1",
       realm: "office.test",
       authMode: "static",

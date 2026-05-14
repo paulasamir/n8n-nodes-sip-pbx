@@ -174,6 +174,9 @@ export class QueueService {
       this.publisher.publishOffline(entry.ref, config.publicRef, {
         mode: entry.mode,
         legId: this.resolvePublishedLiveLegId(entry),
+        callerNumber: entry.queueDialConfig.callerNumber,
+        callerName: entry.queueDialConfig.callerName,
+        trunkRef: entry.trunkRef,
       });
       return;
     }
@@ -195,7 +198,12 @@ export class QueueService {
     }
     entry.placedPublished = true;
     entry.updatedAt = nowMs();
-    this.publisher.publishPlaced(entry.ref, config.publicRef, entry.legId);
+    this.publisher.publishPlaced(entry.ref, config.publicRef, {
+      legId: entry.legId,
+      callerNumber: entry.queueDialConfig.callerNumber,
+      callerName: entry.queueDialConfig.callerName,
+      trunkRef: entry.trunkRef,
+    });
   }
 
   getQueueStats(target: { ref?: string; legId?: string }): Record<string, unknown> {
@@ -285,6 +293,9 @@ export class QueueService {
       this.publisher.publishOffline(entry.ref, config.publicRef, {
         mode: entry.mode,
         legId: this.resolvePublishedLiveLegId(entry),
+        callerNumber: entry.queueDialConfig.callerNumber,
+        callerName: entry.queueDialConfig.callerName,
+        trunkRef: entry.trunkRef,
       });
       return;
     }

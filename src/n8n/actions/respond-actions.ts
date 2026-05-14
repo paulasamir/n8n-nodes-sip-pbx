@@ -3,37 +3,51 @@ import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { readBooleanParameter, readCollectionOptions, readNumberParameter, readStringParameter, requireActionValue } from "../shared/input-normalization";
 import { resolveAiToolRequestId, resolveAuthRequestId, resolveRecordRequestId } from "../shared/id-resolution";
 
+export function buildGlobalRecordingActionInput(
+  node: any,
+  index: number,
+  collectionName: string,
+  includeActive = true,
+): Record<string, unknown> {
+  const input: Record<string, unknown> = {};
+  if (includeActive) {
+    const active = readBooleanParameter(node, "active", index, true);
+    input.active = active;
+    if (!active) {
+      return input;
+    }
+  }
+  const options = readCollectionOptions(node, collectionName, index);
+  const recordFilePath = requireActionValue("recordFilePath", readStringParameter(node, "recordFilePath", index, ""));
+  const recordFileFormat = readStringParameter(node, "recordFileFormat", index, OPTION_DEFAULTS.recordAudio.fileFormat);
+  input.recordFilePath = recordFilePath;
+  input.recordFileFormat = recordFileFormat;
+  if (recordFileFormat === "wav") {
+    input.recordWavSampleRate = Number.isFinite(Number(options.recordWavSampleRate))
+      ? Number(options.recordWavSampleRate)
+      : readNumberParameter(node, "recordWavSampleRate", index, OPTION_DEFAULTS.recordAudio.wavSampleRate);
+    input.recordWavBitDepth = Number.isFinite(Number(options.recordWavBitDepth))
+      ? Number(options.recordWavBitDepth)
+      : readNumberParameter(node, "recordWavBitDepth", index, OPTION_DEFAULTS.recordAudio.wavBitDepth);
+  } else {
+    input.recordCompressedSampleRate = Number.isFinite(Number(options.recordCompressedSampleRate))
+      ? Number(options.recordCompressedSampleRate)
+      : readNumberParameter(node, "recordCompressedSampleRate", index, OPTION_DEFAULTS.recordAudio.compressedSampleRate);
+    input.recordCompressedBitrate = Number.isFinite(Number(options.recordCompressedBitrate))
+      ? Number(options.recordCompressedBitrate)
+      : readNumberParameter(node, "recordCompressedBitrate", index, OPTION_DEFAULTS.recordAudio.compressedBitrateKbps);
+  }
+  input.recordSplitChannels = Boolean(readBooleanParameter(node, "recordSplitChannels", index, OPTION_DEFAULTS.autoRecording.splitChannels));
+  input.waitForRecordingCompletion = Boolean(readBooleanParameter(node, "waitForRecordingCompletion", index, OPTION_DEFAULTS.autoRecording.waitForCompletion));
+  return input;
+}
+
 export async function executeRespondToRecord(node: any, runtime: PbxRuntime, item: any, index: number): Promise<any> {
   const recordRequestId = requireActionValue("recordRequestId", resolveRecordRequestId(node, item, index));
-  const active = readBooleanParameter(node, "active", index, true);
-  const respondOptions = readCollectionOptions(node, "respondOptions", index);
   const input: Record<string, unknown> = {
     recordRequestId,
-    active,
+    ...buildGlobalRecordingActionInput(node, index, "respondOptions", true),
   };
-  if (active) {
-    const recordFilePath = requireActionValue("recordFilePath", readStringParameter(node, "recordFilePath", index, ""));
-    const recordFileFormat = readStringParameter(node, "recordFileFormat", index, OPTION_DEFAULTS.recordAudio.fileFormat);
-    input.recordFilePath = recordFilePath;
-    input.recordFileFormat = recordFileFormat;
-    if (recordFileFormat === "wav") {
-      input.recordWavSampleRate = Number.isFinite(Number(respondOptions.recordWavSampleRate))
-        ? Number(respondOptions.recordWavSampleRate)
-        : readNumberParameter(node, "recordWavSampleRate", index, OPTION_DEFAULTS.recordAudio.wavSampleRate);
-      input.recordWavBitDepth = Number.isFinite(Number(respondOptions.recordWavBitDepth))
-        ? Number(respondOptions.recordWavBitDepth)
-        : readNumberParameter(node, "recordWavBitDepth", index, OPTION_DEFAULTS.recordAudio.wavBitDepth);
-    } else {
-      input.recordCompressedSampleRate = Number.isFinite(Number(respondOptions.recordCompressedSampleRate))
-        ? Number(respondOptions.recordCompressedSampleRate)
-        : readNumberParameter(node, "recordCompressedSampleRate", index, OPTION_DEFAULTS.recordAudio.compressedSampleRate);
-      input.recordCompressedBitrate = Number.isFinite(Number(respondOptions.recordCompressedBitrate))
-        ? Number(respondOptions.recordCompressedBitrate)
-        : readNumberParameter(node, "recordCompressedBitrate", index, OPTION_DEFAULTS.recordAudio.compressedBitrateKbps);
-    }
-    input.recordSplitChannels = Boolean(readBooleanParameter(node, "recordSplitChannels", index, OPTION_DEFAULTS.autoRecording.splitChannels));
-    input.waitForRecordingCompletion = Boolean(readBooleanParameter(node, "waitForRecordingCompletion", index, OPTION_DEFAULTS.autoRecording.waitForCompletion));
-  }
   return await runtime.respondToRecord(input);
 }
 

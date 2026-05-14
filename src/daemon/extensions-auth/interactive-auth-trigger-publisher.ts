@@ -1,7 +1,12 @@
 import { ExtensionsTriggerBranchAuth } from "../../shared/branches";
 import type { InteractiveAuthRequest } from "./types";
 
-export type AuthTriggerPublisher = (ref: string, branch: typeof ExtensionsTriggerBranchAuth, payload: Record<string, unknown>) => void;
+export type AuthTriggerPublisher = (
+  kind: InteractiveAuthRequest["triggerKind"],
+  ref: string,
+  branch: typeof ExtensionsTriggerBranchAuth,
+  payload: Record<string, unknown>,
+) => void;
 
 function buildPublicAuthorization(value: unknown): Record<string, unknown> {
   const authorization = value && typeof value === "object"
@@ -29,7 +34,7 @@ export class InteractiveAuthTriggerPublisher {
   }
 
   publishRequest(request: InteractiveAuthRequest): void {
-    this.publish(request.ref, ExtensionsTriggerBranchAuth, {
+    this.publish(request.triggerKind, request.ref, ExtensionsTriggerBranchAuth, {
       authRequestId: request.authRequestId,
       ref: String(request.publicRef || request.ref || ""),
       requestType: request.requestContext.requestType,

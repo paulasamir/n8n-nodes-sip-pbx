@@ -3,6 +3,7 @@ import {
   QUEUE_EXTENSIONS_HINT,
   REF_HINT,
   buildAddOptionsCollectionProperty,
+  buildSipListenerOptionEntries,
   buildStaticCredentialsCollectionProperty,
   type UiProperty,
 } from "./description-fragments";
@@ -13,21 +14,118 @@ const EXTENSIONS_USERNAME_PREFIX_HINT =
 const AI_TOOL_TIMEOUT_HINT =
   "If Respond To AI Tool does not arrive in time, this trigger returns timeout.";
 const RECORD_TIMEOUT_HINT =
-  "If Respond To Record does not arrive in time, this trigger discards the pending record request.";
+  "If Respond to recording does not arrive in time, this trigger discards the pending record request.";
 const AUTH_TIMEOUT_HINT =
   "If Respond To Auth does not arrive in time, this trigger assumes not_applicable.";
 
-function buildContinueTraversalOnAuthRejectProperty(): UiProperty {
+function buildRecordResponseTimeoutOption(defaultSeconds: number): UiProperty {
+  return {
+    displayName: "Respond to recording timeout (Seconds)",
+    name: "recordResponseTimeoutSeconds",
+    type: "number",
+    default: defaultSeconds,
+    description: RECORD_TIMEOUT_HINT,
+  };
+}
+
+function buildAuthTimeoutOption(defaultSeconds: number): UiProperty {
+  return {
+    displayName: "Auth Timeout (Seconds)",
+    name: "authTimeoutSeconds",
+    type: "number",
+    default: defaultSeconds,
+    description: AUTH_TIMEOUT_HINT,
+  };
+}
+
+function buildUsernamePrefixOption(): UiProperty {
+  return {
+    displayName: "Username Prefix",
+    name: "authorizationUsernamePrefix",
+    type: "string",
+    default: "",
+    description: EXTENSIONS_USERNAME_PREFIX_HINT,
+  };
+}
+
+function buildContinueTraversalOnAuthRejectProperty(defaultValue: boolean): UiProperty {
   return {
     displayName: "Continue On Auth Reject",
     name: "continueTraversalOnAuthReject",
     type: "boolean",
-    default: OPTION_DEFAULTS.trigger.extensions.continueTraversalOnAuthReject,
-    description: "When enabled, this trigger does not stop extensions auth traversal on auth reject results such as wrong password or workflow deny. The daemon keeps the last reject and returns it only if no later trigger allows or challenges the same request.",
+    default: defaultValue,
+    description: "When enabled, this trigger does not stop auth traversal on auth reject results such as wrong password or workflow deny. The daemon keeps the last reject and returns it only if no later trigger allows or challenges the same request.",
   };
 }
 
+function buildTrunkOptions(registerMode: boolean, recording: boolean): UiProperty[] {
+  const entries: UiProperty[] = [];
+  if (registerMode) {
+    entries.push({
+      displayName: "Registration Expires (Seconds)",
+      name: "registrationExpires",
+      type: "number",
+      default: OPTION_DEFAULTS.sip.registrationExpiresSeconds,
+    });
+    entries.push(buildHeadersCollectionProperty("REGISTER Headers", "registerHeaders", {}));
+  } else {
+    entries.push(buildAuthTimeoutOption(OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds));
+    entries.push(buildContinueTraversalOnAuthRejectProperty(OPTION_DEFAULTS.trigger.trunk.continueTraversalOnAuthReject));
+    entries.push(...buildSipListenerOptionEntries("trunk"));
+  }
+  if (recording) {
+    entries.push(buildRecordResponseTimeoutOption(OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds));
+  }
+  return entries;
+}
+
+function buildExtensionsOptions(authMode: "static" | "digest-first" | "raw", recording: boolean): UiProperty[] {
+  const entries: UiProperty[] = [];
+  if (authMode !== "static") {
+    entries.push(buildAuthTimeoutOption(OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds));
+  }
+  if (recording) {
+    entries.push(buildRecordResponseTimeoutOption(OPTION_DEFAULTS.trigger.extensions.recordResponseTimeoutSeconds));
+  }
+  entries.push(...buildSipListenerOptionEntries("extensions"));
+  if (authMode !== "raw") {
+    entries.push(buildUsernamePrefixOption());
+  }
+  entries.push(buildContinueTraversalOnAuthRejectProperty(OPTION_DEFAULTS.trigger.extensions.continueTraversalOnAuthReject));
+  return entries;
+}
+
 export function buildTriggerNodeProperties(): UiProperty[] {
+  const trunkAuthModes: Array<["register" | "auth", boolean]> = [
+    ["register", false],
+    ["auth", false],
+    ["auth", true],
+    ["register", true],
+  ];
+  const trunkOptionsProperties = trunkAuthModes.map(([registerMode, recording]) =>
+    buildAddOptionsCollectionProperty(
+      "trunkOptions",
+      { triggerOn: ["trunk"], trunkRegisterMode: [registerMode], enableCallRecording: [recording] },
+      buildTrunkOptions(registerMode === "register", recording),
+    ),
+  );
+
+  const extensionsVariants: Array<["static" | "digest-first" | "raw", boolean]> = [
+    ["static", false],
+    ["static", true],
+    ["digest-first", false],
+    ["digest-first", true],
+    ["raw", false],
+    ["raw", true],
+  ];
+  const extensionsOptionsProperties = extensionsVariants.map(([authMode, recording]) =>
+    buildAddOptionsCollectionProperty(
+      "extensionsOptions",
+      { triggerOn: ["extensions"], authMode: [authMode], extensionsEnableCallRecording: [recording] },
+      buildExtensionsOptions(authMode, recording),
+    ),
+  );
+
   return [
     {
       displayName: "Trigger On",
@@ -71,49 +169,26 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayOptions: { show: { triggerOn: ["trunk"] } },
     },
     {
-      displayName: "Credential for SIP Connection",
+      displayName: "Connection role",
+      name: "trunkRegisterMode",
+      type: "options",
+      default: OPTION_DEFAULTS.trigger.trunk.registerMode,
+      required: true,
+      displayOptions: { show: { triggerOn: ["trunk"] } },
+      options: [
+        { name: "Outgoing Registration", value: "register" },
+        { name: "Inbound Authorization", value: "auth" },
+      ],
+    },
+    {
+      displayName: "SIP Connection",
       name: "sipPbxExternal",
       type: "credentials",
       default: "",
-      displayOptions: { show: { triggerOn: ["trunk"] } },
+      displayOptions: { show: { triggerOn: ["trunk"], trunkRegisterMode: ["register"] } },
     },
-
-    { displayName: "Register On Start", name: "registerOnStart", type: "boolean", default: OPTION_DEFAULTS.trigger.trunk.registerOnStart, displayOptions: { show: { triggerOn: ["trunk"] } } },
     { displayName: "Global Call Recording", name: "enableCallRecording", type: "boolean", default: OPTION_DEFAULTS.trigger.trunk.enableCallRecording, displayOptions: { show: { triggerOn: ["trunk"] } } },
-    buildAddOptionsCollectionProperty("trunkOptions", { triggerOn: ["trunk"], registerOnStart: [true], enableCallRecording: [false] }, [
-      {
-        displayName: "Registration Expires (Seconds)",
-        name: "registrationExpires",
-        type: "number",
-        default: OPTION_DEFAULTS.sip.registrationExpiresSeconds,
-      },
-      buildHeadersCollectionProperty("REGISTER Headers", "registerHeaders", {}),
-    ]),
-    buildAddOptionsCollectionProperty("trunkOptions", { triggerOn: ["trunk"], registerOnStart: [false], enableCallRecording: [true] }, [
-      {
-        displayName: "Respond To Record Timeout (Seconds)",
-        name: "recordResponseTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds,
-        description: RECORD_TIMEOUT_HINT,
-      },
-    ]),
-    buildAddOptionsCollectionProperty("trunkOptions", { triggerOn: ["trunk"], registerOnStart: [true], enableCallRecording: [true] }, [
-      {
-        displayName: "Registration Expires (Seconds)",
-        name: "registrationExpires",
-        type: "number",
-        default: OPTION_DEFAULTS.sip.registrationExpiresSeconds,
-      },
-      buildHeadersCollectionProperty("REGISTER Headers", "registerHeaders", {}),
-      {
-        displayName: "Respond To Record Timeout (Seconds)",
-        name: "recordResponseTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds,
-        description: RECORD_TIMEOUT_HINT,
-      },
-    ]),
+    ...trunkOptionsProperties,
 
     {
       displayName: "Extensions Ref",
@@ -138,335 +213,7 @@ export function buildTriggerNodeProperties(): UiProperty[] {
     },
     buildStaticCredentialsCollectionProperty("staticCredentials", { triggerOn: ["extensions"], authMode: ["static"] }),
     { displayName: "Global Call Recording", name: "extensionsEnableCallRecording", type: "boolean", default: OPTION_DEFAULTS.trigger.extensions.enableCallRecording, displayOptions: { show: { triggerOn: ["extensions"] } } },
-    buildAddOptionsCollectionProperty("extensionsOptions", { triggerOn: ["extensions"], authMode: ["static"], extensionsEnableCallRecording: [false] }, [
-      {
-        displayName: "Transport",
-        name: "extensionTransports",
-        type: "multiOptions",
-        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
-        options: [
-          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
-        ],
-      },
-      {
-        displayName: "Local Bind Port",
-        name: "extensionsLocalBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
-      },
-      {
-        displayName: "TLS Bind Port",
-        name: "extensionsTlsBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
-      },
-      {
-        displayName: "Local Bind IP",
-        name: "extensionsLocalBindIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Advertised IP",
-        name: "advertisedIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Realm",
-        name: "realm",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Username Prefix",
-        name: "authorizationUsernamePrefix",
-        type: "string",
-        default: "",
-        description: EXTENSIONS_USERNAME_PREFIX_HINT,
-      },
-      buildContinueTraversalOnAuthRejectProperty(),
-    ]),
-    buildAddOptionsCollectionProperty("extensionsOptions", { triggerOn: ["extensions"], authMode: ["static"], extensionsEnableCallRecording: [true] }, [
-      {
-        displayName: "Respond To Record Timeout (Seconds)",
-        name: "recordResponseTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.recordResponseTimeoutSeconds,
-        description: RECORD_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Transport",
-        name: "extensionTransports",
-        type: "multiOptions",
-        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
-        options: [
-          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
-        ],
-      },
-      {
-        displayName: "Local Bind Port",
-        name: "extensionsLocalBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
-      },
-      {
-        displayName: "TLS Bind Port",
-        name: "extensionsTlsBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
-      },
-      {
-        displayName: "Local Bind IP",
-        name: "extensionsLocalBindIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Advertised IP",
-        name: "advertisedIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Realm",
-        name: "realm",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Username Prefix",
-        name: "authorizationUsernamePrefix",
-        type: "string",
-        default: "",
-        description: EXTENSIONS_USERNAME_PREFIX_HINT,
-      },
-      buildContinueTraversalOnAuthRejectProperty(),
-    ]),
-    buildAddOptionsCollectionProperty("extensionsOptions", { triggerOn: ["extensions"], authMode: ["digest-first"], extensionsEnableCallRecording: [false] }, [
-      {
-        displayName: "Auth Timeout (Seconds)",
-        name: "authTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds,
-        description: AUTH_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Transport",
-        name: "extensionTransports",
-        type: "multiOptions",
-        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
-        options: [
-          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
-        ],
-      },
-      {
-        displayName: "Local Bind Port",
-        name: "extensionsLocalBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
-      },
-      {
-        displayName: "TLS Bind Port",
-        name: "extensionsTlsBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
-      },
-      {
-        displayName: "Local Bind IP",
-        name: "extensionsLocalBindIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Advertised IP",
-        name: "advertisedIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Realm",
-        name: "realm",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Username Prefix",
-        name: "authorizationUsernamePrefix",
-        type: "string",
-        default: "",
-        description: EXTENSIONS_USERNAME_PREFIX_HINT,
-      },
-      buildContinueTraversalOnAuthRejectProperty(),
-    ]),
-    buildAddOptionsCollectionProperty("extensionsOptions", { triggerOn: ["extensions"], authMode: ["digest-first"], extensionsEnableCallRecording: [true] }, [
-      {
-        displayName: "Auth Timeout (Seconds)",
-        name: "authTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds,
-        description: AUTH_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Respond To Record Timeout (Seconds)",
-        name: "recordResponseTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.recordResponseTimeoutSeconds,
-        description: RECORD_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Transport",
-        name: "extensionTransports",
-        type: "multiOptions",
-        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
-        options: [
-          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
-        ],
-      },
-      {
-        displayName: "Local Bind Port",
-        name: "extensionsLocalBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
-      },
-      {
-        displayName: "TLS Bind Port",
-        name: "extensionsTlsBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
-      },
-      {
-        displayName: "Local Bind IP",
-        name: "extensionsLocalBindIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Advertised IP",
-        name: "advertisedIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Realm",
-        name: "realm",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Username Prefix",
-        name: "authorizationUsernamePrefix",
-        type: "string",
-        default: "",
-        description: EXTENSIONS_USERNAME_PREFIX_HINT,
-      },
-      buildContinueTraversalOnAuthRejectProperty(),
-    ]),
-    buildAddOptionsCollectionProperty("extensionsOptions", { triggerOn: ["extensions"], authMode: ["raw"], extensionsEnableCallRecording: [false] }, [
-      {
-        displayName: "Auth Timeout (Seconds)",
-        name: "authTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds,
-        description: AUTH_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Transport",
-        name: "extensionTransports",
-        type: "multiOptions",
-        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
-        options: [
-          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
-        ],
-      },
-      {
-        displayName: "Local Bind Port",
-        name: "extensionsLocalBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
-      },
-      {
-        displayName: "TLS Bind Port",
-        name: "extensionsTlsBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
-      },
-      {
-        displayName: "Local Bind IP",
-        name: "extensionsLocalBindIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Advertised IP",
-        name: "advertisedIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Realm",
-        name: "realm",
-        type: "string",
-        default: "",
-      },
-      buildContinueTraversalOnAuthRejectProperty(),
-    ]),
-    buildAddOptionsCollectionProperty("extensionsOptions", { triggerOn: ["extensions"], authMode: ["raw"], extensionsEnableCallRecording: [true] }, [
-      {
-        displayName: "Auth Timeout (Seconds)",
-        name: "authTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds,
-        description: AUTH_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Respond To Record Timeout (Seconds)",
-        name: "recordResponseTimeoutSeconds",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.recordResponseTimeoutSeconds,
-        description: RECORD_TIMEOUT_HINT,
-      },
-      {
-        displayName: "Transport",
-        name: "extensionTransports",
-        type: "multiOptions",
-        default: [...OPTION_DEFAULTS.trigger.extensions.transports],
-        options: [
-          { name: "UDP", value: OPTION_DEFAULTS.sip.transport },
-        ],
-      },
-      {
-        displayName: "Local Bind Port",
-        name: "extensionsLocalBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.localBindPort,
-      },
-      {
-        displayName: "TLS Bind Port",
-        name: "extensionsTlsBindPort",
-        type: "number",
-        default: OPTION_DEFAULTS.trigger.extensions.tlsBindPort,
-      },
-      {
-        displayName: "Local Bind IP",
-        name: "extensionsLocalBindIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Advertised IP",
-        name: "advertisedIp",
-        type: "string",
-        default: "",
-      },
-      {
-        displayName: "Realm",
-        name: "realm",
-        type: "string",
-        default: "",
-      },
-      buildContinueTraversalOnAuthRejectProperty(),
-    ]),
+    ...extensionsOptionsProperties,
 
     {
       displayName: "Queue Ref",
