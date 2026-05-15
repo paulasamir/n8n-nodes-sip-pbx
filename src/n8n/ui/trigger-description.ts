@@ -8,6 +8,7 @@ import {
   TrunkTriggerBranchCall,
   TrunkTriggerBranchRecord,
 } from "../../shared/branches";
+import { TRUNK_CONNECTION_MODE_DYNAMIC, TRUNK_CONNECTION_MODE_FIXED } from "../../shared/trunk-trigger";
 import { buildTriggerNodeProperties } from "./trigger-properties";
 
 function listToOutputs(names: readonly string[]): string {
@@ -23,6 +24,7 @@ function triggerOutputsExpression(): string {
   const authName = JSON.stringify(ExtensionsTriggerBranchAuth);
   const extCallName = JSON.stringify(ExtensionsTriggerBranchCall);
   const extRecordName = JSON.stringify(ExtensionsTriggerBranchRecord);
+  const dynamicMode = JSON.stringify(TRUNK_CONNECTION_MODE_DYNAMIC);
   return `={{(() => {
     const triggerOn = $parameter["triggerOn"];
     if (triggerOn === "aiTool") return [${aiTool}];
@@ -42,7 +44,7 @@ function triggerOutputsExpression(): string {
     if ($parameter["enableCallRecording"]) {
       outputs.push({ type: "main", displayName: ${recordName} });
     }
-    if ($parameter["trunkRegisterMode"] === "auth") {
+    if ($parameter["trunkConnectionMode"] === ${dynamicMode} && $parameter["authMode"] !== "static") {
       outputs.push({ type: "main", displayName: ${trunkAuthName} });
     }
     return outputs;
@@ -50,6 +52,7 @@ function triggerOutputsExpression(): string {
 }
 
 export function createSipPbxTriggerDescription(): Record<string, unknown> {
+  const fixedRole = TRUNK_CONNECTION_MODE_FIXED;
   return {
     displayName: "SIP PBX Trigger",
     name: "sipPbxTrigger",
@@ -80,7 +83,7 @@ export function createSipPbxTriggerDescription(): Record<string, unknown> {
       {
         name: "sipPbxExternal",
         required: false,
-        displayOptions: { show: { triggerOn: ["trunk"], trunkRegisterMode: ["register"] } },
+        displayOptions: { show: { triggerOn: ["trunk"], trunkConnectionMode: [fixedRole] } },
       },
     ],
     properties: buildTriggerNodeProperties(),

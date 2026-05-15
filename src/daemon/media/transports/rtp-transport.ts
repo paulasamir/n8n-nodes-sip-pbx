@@ -634,6 +634,7 @@ export class RtpTransport implements MediaTransport {
   private firstInboundAudioLogged = false;
   private firstInboundAudioDecodeFailedLogged = false;
   private sendErrorLogged = false;
+  private lastInboundDtmfKey = "";
 
   private decodeBufferPool: RtpDecodeBufferPool | null = null;
 
@@ -806,6 +807,11 @@ export class RtpTransport implements MediaTransport {
       if (!dtmf || !dtmf.end) {
         return;
       }
+      const dtmfKey = `${parsed.ssrc}:${parsed.timestamp}:${dtmf.digits}`;
+      if (dtmfKey === this.lastInboundDtmfKey) {
+        return;
+      }
+      this.lastInboundDtmfKey = dtmfKey;
       this.dispatch({
         type: "dtmf",
         digits: dtmf.digits,

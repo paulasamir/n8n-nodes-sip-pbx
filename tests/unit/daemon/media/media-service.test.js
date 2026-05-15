@@ -200,6 +200,134 @@ test("MediaService.playTone rejects invalid custom tone grammar before starting 
   );
 });
 
+test("MediaService consumes inbound DTMF while blocking playback is active without forwarding it to the leg queue", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+  const { PlayAudioOperation } = require("../../../../build-src/daemon/media/operations/play-audio-operation.js");
+
+  const legRegistry = new MapRegistry();
+  const legService = new LegService(legRegistry);
+  const registry = new MapRegistry();
+  const service = new MediaService(registry, legService);
+  const leg = legService.createLeg({
+    legId: "leg-blocking-dtmf-consume",
+    direction: "inbound",
+    transportType: "websocket",
+  });
+
+  service.executionPlane = {
+    registerPlayback: async () => ({ legId: leg.legId, playbackCount: 1, recordingActive: false, activePlaybackMediaIds: ["media-blocking-dtmf-consume"], activeRecordingMediaId: null, playbackMix: [] }),
+    unregisterPlayback: async () => null,
+    startRecording: async () => { throw new Error("unused"); },
+    stopRecording: async () => null,
+    activateGlobalRecording: async () => { throw new Error("unused"); },
+    deactivateGlobalRecording: async () => null,
+    finalizeRecording: async () => ({}),
+    pauseGlobalRecording: async () => undefined,
+    resumeGlobalRecording: async () => undefined,
+    getRecordingMediaId: () => null,
+    sendDtmf: async () => false,
+    ensureTransportEndpoint: async () => ({}),
+    activateBridge: async () => undefined,
+    deactivateBridge: async () => undefined,
+    beginBridgeTermination: () => undefined,
+    orphanBridgeAfterLegEnd: async () => undefined,
+    pruneLegIfIdle: async () => undefined,
+    waitUntilLegStable: async () => undefined,
+    removeLeg: async () => undefined,
+    getSnapshot: () => null,
+    getBridgePeerInfo: () => null,
+    getWorkerCount: () => 0,
+    shutdown: async () => undefined,
+  };
+
+  const operation = PlayAudioOperation.create(registry, {
+    mediaId: "media-blocking-dtmf-consume",
+    legId: leg.legId,
+    options: {
+      mediaExecutionMode: "blocking",
+      interruptOnDtmf: false,
+    },
+    onDestroy: service.handleOperationDestroy.bind(service),
+  });
+
+  try {
+    await service.handleInboundDtmf(leg.legId, "5");
+
+    assert.strictEqual(operation.finalized, false);
+    assert.strictEqual(leg.shiftEventMatching((event) => event.eventType === "dtmf"), null);
+  } finally {
+    await service.finalizeOperation(operation.mediaId, "completed", {});
+    cleanupLeg(legService, leg.legId);
+  }
+});
+
+test("MediaService keeps inbound DTMF in the leg queue when blocking playback is configured to interrupt on DTMF", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+  const { PlayAudioOperation } = require("../../../../build-src/daemon/media/operations/play-audio-operation.js");
+
+  const legRegistry = new MapRegistry();
+  const legService = new LegService(legRegistry);
+  const registry = new MapRegistry();
+  const service = new MediaService(registry, legService);
+  const leg = legService.createLeg({
+    legId: "leg-blocking-dtmf-forward",
+    direction: "inbound",
+    transportType: "websocket",
+  });
+
+  service.executionPlane = {
+    registerPlayback: async () => ({ legId: leg.legId, playbackCount: 1, recordingActive: false, activePlaybackMediaIds: ["media-blocking-dtmf-forward"], activeRecordingMediaId: null, playbackMix: [] }),
+    unregisterPlayback: async () => null,
+    startRecording: async () => { throw new Error("unused"); },
+    stopRecording: async () => null,
+    activateGlobalRecording: async () => { throw new Error("unused"); },
+    deactivateGlobalRecording: async () => null,
+    finalizeRecording: async () => ({}),
+    pauseGlobalRecording: async () => undefined,
+    resumeGlobalRecording: async () => undefined,
+    getRecordingMediaId: () => null,
+    sendDtmf: async () => false,
+    ensureTransportEndpoint: async () => ({}),
+    activateBridge: async () => undefined,
+    deactivateBridge: async () => undefined,
+    beginBridgeTermination: () => undefined,
+    orphanBridgeAfterLegEnd: async () => undefined,
+    pruneLegIfIdle: async () => undefined,
+    waitUntilLegStable: async () => undefined,
+    removeLeg: async () => undefined,
+    getSnapshot: () => null,
+    getBridgePeerInfo: () => null,
+    getWorkerCount: () => 0,
+    shutdown: async () => undefined,
+  };
+
+  const operation = PlayAudioOperation.create(registry, {
+    mediaId: "media-blocking-dtmf-forward",
+    legId: leg.legId,
+    options: {
+      mediaExecutionMode: "blocking",
+      interruptOnDtmf: true,
+    },
+    onDestroy: service.handleOperationDestroy.bind(service),
+  });
+
+  try {
+    await service.handleInboundDtmf(leg.legId, "6");
+
+    const dtmfEvent = leg.shiftEventMatching((event) => event.eventType === "dtmf");
+    assert.ok(dtmfEvent);
+    assert.strictEqual(dtmfEvent.digits, "6");
+    assert.strictEqual(operation.finalized, true);
+    assert.strictEqual(operation.status, "interrupted");
+  } finally {
+    cleanupLeg(legService, leg.legId);
+  }
+});
+
 test("MediaService.stopMedia by legId is a no-op success when the leg has no active media", async () => {
   const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
   const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");

@@ -1,6 +1,11 @@
 import type { PbxRuntime } from "../../runtime/pbx-runtime";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import {
+  TRUNK_CONNECTION_MODE_DYNAMIC,
+  TRUNK_CONNECTION_MODE_FIXED,
+  type TrunkConnectionMode,
+} from "../../shared/trunk-trigger";
+import {
   buildEmptyOutputs,
   buildTrunkTriggerBranchOrder,
   requireBranchIndex,
@@ -13,6 +18,7 @@ import { readCredentialsParameter } from "../shared/credential-loading";
 import { readCollectionOptions, readHeaderLinesFromCollectionOptions, readStringParameter } from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem, normalizePublicRawObject } from "../shared/output-builders";
 import { extractSipDisplayName, extractSipUser } from "../shared/sip-address";
+import { readSharedAuthTriggerConfig } from "./shared-auth-trigger";
 
 function optionalNumber(value: unknown, fallback: number): number {
   if (value == null || value === "") {
@@ -31,48 +37,74 @@ function pickFirst(...sources: unknown[]): unknown {
   return undefined;
 }
 
-function normalizeTrunkRegisterModeValue(value: unknown): "register" | "auth" {
-  return String(value || OPTION_DEFAULTS.trigger.trunk.registerMode).trim().toLowerCase() === "auth"
-    ? "auth"
-    : "register";
-}
-
 export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Promise<any> {
   const ref = readStringParameter(node, "ref", 0, "");
   if (!ref) {
     throw new Error("Trigger ref is required");
   }
-  const trunkRegisterMode = normalizeTrunkRegisterModeValue(
-    node.getNodeParameter?.("trunkRegisterMode", 0, OPTION_DEFAULTS.trigger.trunk.registerMode),
-  );
-  const registerMode = trunkRegisterMode === "register";
+  const trunkConnectionMode = (
+    String(node.getNodeParameter?.("trunkConnectionMode", 0, OPTION_DEFAULTS.trigger.trunk.connectionMode) || "").trim()
+    === TRUNK_CONNECTION_MODE_DYNAMIC
+      ? TRUNK_CONNECTION_MODE_DYNAMIC
+      : TRUNK_CONNECTION_MODE_FIXED
+  ) as TrunkConnectionMode;
+  const fixedAddressMode = trunkConnectionMode === TRUNK_CONNECTION_MODE_FIXED;
+  const useRegistration = fixedAddressMode
+    ? Boolean(node.getNodeParameter?.("trunkUseRegistration", 0, OPTION_DEFAULTS.trigger.trunk.useRegistration))
+    : false;
   const enableCallRecording = Boolean(node.getNodeParameter?.("enableCallRecording", 0, OPTION_DEFAULTS.trigger.trunk.enableCallRecording));
   const options = readCollectionOptions(node, "trunkOptions", 0);
-  const sipCredentials = registerMode
+  const authConfig = trunkConnectionMode === TRUNK_CONNECTION_MODE_DYNAMIC
+    ? readSharedAuthTriggerConfig(node, 0, {
+      kind: "trunk",
+      optionsName: "trunkOptions",
+      authModeName: "authMode",
+      staticUsernameName: "trunkStaticUsername",
+      staticPasswordName: "trunkStaticPassword",
+      authTimeoutDefault: OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds,
+      continueTraversalDefault: OPTION_DEFAULTS.trigger.trunk.continueTraversalOnAuthReject,
+    })
+    : null;
+  const sipCredentials = fixedAddressMode
     ? await readCredentialsParameter(node, "sipPbxExternal", 0)
     : null;
   const credentials = sipCredentials || {};
-  const hasAuthBranch = !registerMode;
+  const hasAuthBranch = trunkConnectionMode === TRUNK_CONNECTION_MODE_DYNAMIC
+    && authConfig?.authMode !== "static";
   const config: Record<string, unknown> = {
     ref,
-    trunkRegisterMode,
+    trunkConnectionMode,
+    trunkUseRegistration: useRegistration,
     enableCallRecording,
     transport: String(pickFirst(options.transport, credentials.transport) || OPTION_DEFAULTS.sip.transport),
     localBindIp: String(pickFirst(options.localBindIp, credentials.localBindIp) || "").trim(),
-    localBindPort: Number(pickFirst(options.localBindPort, credentials.localBindPort) || 0) || 0,
+    localBindPort: (() => {
+      const raw = pickFirst(options.localBindPort, credentials.localBindPort);
+      if (raw == null || raw === "") {
+        return OPTION_DEFAULTS.sip.port;
+      }
+      const numeric = Number(raw);
+      return Number.isFinite(numeric) ? numeric : OPTION_DEFAULTS.sip.port;
+    })(),
     tlsBindPort: optionalNumber(pickFirst(options.tlsBindPort), OPTION_DEFAULTS.sip.tlsPort),
     advertisedIp: String(pickFirst(options.advertisedIp, credentials.publicDomain) || "").trim(),
   };
   if (sipCredentials) {
     config.sipCredentials = sipCredentials;
   }
-  if (registerMode) {
+  if (fixedAddressMode && useRegistration) {
     config.registrationExpires = optionalNumber(options.registrationExpires, OPTION_DEFAULTS.sip.registrationExpiresSeconds);
     config.registerHeaders = readHeaderLinesFromCollectionOptions(options, "registerHeaders");
-  } else {
+  } else if (trunkConnectionMode === TRUNK_CONNECTION_MODE_DYNAMIC) {
     config.realm = String(options.realm || "").trim();
-    config.authTimeoutSeconds = optionalNumber(options.authTimeoutSeconds, OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds);
-    config.continueTraversalOnAuthReject = options.continueTraversalOnAuthReject === true;
+    config.authMode = authConfig?.authMode || OPTION_DEFAULTS.trigger.trunk.authMode;
+    config.authorizationUsernamePrefix = authConfig?.authorizationUsernamePrefix || "";
+    config.continueTraversalOnAuthReject = authConfig?.continueTraversalOnAuthReject === true;
+    if (authConfig?.authMode === "static") {
+      config.staticCredentials = authConfig.staticCredentials || [];
+    } else {
+      config.authTimeoutSeconds = authConfig?.authTimeoutSeconds;
+    }
   }
   if (enableCallRecording) {
     config.recordResponseTimeoutSeconds = optionalNumber(options.recordResponseTimeoutSeconds, OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds);

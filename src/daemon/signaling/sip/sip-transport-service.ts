@@ -3,6 +3,11 @@ import { randomBytes } from "crypto";
 import os from "os";
 import type { AddressInfo } from "net";
 import { OPTION_DEFAULTS } from "../../../shared/option-defaults";
+import {
+  TRUNK_CONNECTION_MODE_DYNAMIC,
+  TRUNK_CONNECTION_MODE_FIXED,
+  type TrunkConnectionMode,
+} from "../../../shared/trunk-trigger";
 import { LEG_STATUS_ENDED } from "../../../shared/result-events";
 import { LegCoordinator } from "../../legs/leg-coordinator";
 import { daemonError } from "../../core/daemon-error";
@@ -47,12 +52,22 @@ type ExtensionsHost = SipHostBase & {
 type TrunkHost = SipHostBase & {
   routeToken: string;
   credentials: Record<string, unknown>;
-  registerMode: boolean;
+  connectionMode: TrunkConnectionMode;
+  useRegistration: boolean;
+  authMode: string;
+  authorizationUsernamePrefix: string;
   authTimeoutMs: number;
   continueTraversalOnAuthReject: boolean;
+  staticCredentials: Array<{ username: string; password: string; extension: string }>;
   registrationExpires: number;
   registerHeaders: SipHeaderEntry[];
   registrationTimer: ReturnType<typeof setTimeout> | null;
+  dynamicRegistration: {
+    contactUri: string;
+    sourceIp: string;
+    sourcePort: number;
+    expiresAt: number | null;
+  } | null;
   registration: {
     requestUri: string;
     remoteAddress: string;
@@ -68,6 +83,7 @@ type TrunkHost = SipHostBase & {
     lastNonce: string | null;
     nonceCount: number;
     authAttempts: number;
+    unregistering: boolean;
   } | null;
 };
 
@@ -77,14 +93,21 @@ type SipUdpListener = {
   bindPort: number;
 };
 
+const SIP_AUTH_OUTCOME_ALLOWED = "allowed" as const;
+const SIP_AUTH_OUTCOME_NOT_APPLICABLE = "not_applicable" as const;
+const SIP_AUTH_OUTCOME_REJECT = "reject" as const;
+const SIP_AUTH_OUTCOME_CHALLENGE = "challenge" as const;
+
 type SipAuthOutcome = {
-  allow: boolean;
+  status:
+    | typeof SIP_AUTH_OUTCOME_ALLOWED
+    | typeof SIP_AUTH_OUTCOME_NOT_APPLICABLE
+    | typeof SIP_AUTH_OUTCOME_REJECT
+    | typeof SIP_AUTH_OUTCOME_CHALLENGE;
   extension?: string;
   statusCode?: number;
   reasonPhrase?: string;
   stale?: boolean;
-  notApplicable?: boolean;
-  challenge?: boolean;
 };
 
 type SipAuthRequestKind = "register" | "invite";
@@ -349,23 +372,6 @@ function trunkRegistrationIdentity(credentials: Record<string, unknown>): string
   ].map((value) => String(value || "").trim()).join("|");
 }
 
-function normalizeTrunkRegisterMode(value: unknown): boolean {
-  if (typeof value === "boolean") {
-    return value;
-  }
-  const text = String(value || "").trim().toLowerCase();
-  if (!text) {
-    return OPTION_DEFAULTS.trigger.trunk.registerMode === "register";
-  }
-  if (text === "register" || text === "true" || text === "1" || text === "yes" || text === "on") {
-    return true;
-  }
-  if (text === "auth" || text === "none" || text === "false" || text === "0" || text === "no" || text === "off") {
-    return false;
-  }
-  return OPTION_DEFAULTS.trigger.trunk.registerMode === "register";
-}
-
 function sendUdp(socket: dgram.Socket, payload: string, port: number, host: string): Promise<void> {
   return new Promise((resolve, reject) => {
     socket.send(Buffer.from(payload, "utf8"), port, host, (error) => {
@@ -392,6 +398,7 @@ export class SipTransportService {
   private readonly onInboundDtmf: (legId: string, digits: string) => void;
   private readonly extensionsHosts = new Map<string, ExtensionsHost>();
   private readonly trunkHosts = new Map<string, TrunkHost>();
+  private readonly pendingTrunkRegisterHosts = new Set<TrunkHost>();
   private readonly udpListeners = new Map<string, SipUdpListener>();
   private readonly inboundSessions = new Map<string, InboundSipSession>();
   private readonly outboundStartups = new Map<string, PendingOutboundSipStartup>();
@@ -511,7 +518,12 @@ export class SipTransportService {
     const credentials = (config.sipCredentials && typeof config.sipCredentials === "object")
       ? { ...(config.sipCredentials as Record<string, unknown>) }
       : {};
-    const registerMode = normalizeTrunkRegisterMode(config.trunkRegisterMode);
+    const connectionMode = String(config.trunkConnectionMode || "").trim() === TRUNK_CONNECTION_MODE_DYNAMIC
+      ? TRUNK_CONNECTION_MODE_DYNAMIC
+      : TRUNK_CONNECTION_MODE_FIXED;
+    const useRegistration = connectionMode === TRUNK_CONNECTION_MODE_FIXED
+      ? config.trunkUseRegistration !== false
+      : false;
     const listener = prepareSipListenerSettings({
       scope: "trunk",
       transport: pickListenerValue(config.transport, credentials.transport),
@@ -519,24 +531,30 @@ export class SipTransportService {
       localBindPort: pickListenerValue(config.localBindPort, credentials.localBindPort),
       advertisedIp: pickListenerValue(config.advertisedIp, credentials.publicDomain),
       realm: config.realm,
-      defaultBindPort: 0,
+      defaultBindPort: OPTION_DEFAULTS.sip.port,
       defaultRealm: "trunk.local",
     });
     const authTimeoutMs = Math.max(0, Math.round(Number(config.authTimeoutSeconds || OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds) * 1000));
+    const authMode = String(config.authMode || OPTION_DEFAULTS.trigger.trunk.authMode);
+    const authorizationUsernamePrefix = normalizeAuthorizationUsernamePrefix(config.authorizationUsernamePrefix);
+    const staticCredentials = normalizeStaticCredentials(config.staticCredentials);
     const existing = this.trunkHosts.get(ref);
     if (existing && canReuseUdpEndpointForSameRef(existing, listener.bindIp, listener.bindPort)) {
       const replaceRegistration = Boolean(
         existing.registration
         && trunkRegistrationIdentity(existing.credentials) !== trunkRegistrationIdentity(credentials),
       );
-      if (!registerMode) {
+      if (connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC) {
         this.assertSharedRealmCompatible(existing.bindIp, existing.bindPort, listener.realm);
       }
       this.clearTrunkRegistrationTimer(existing);
-      if (existing.registration && (!registerMode || replaceRegistration)) {
+      if (existing.registration && (!useRegistration || replaceRegistration)) {
+        const unregisterHost = this.cloneTrunkHostForPendingUnregister(existing);
+        this.pendingTrunkRegisterHosts.add(unregisterHost);
         try {
-          await this.sendTrunkRegister(existing, null, { expiresSeconds: 0 });
+          await this.sendTrunkRegister(unregisterHost, null, { expiresSeconds: 0 });
         } catch (error) {
+          this.finalizePendingTrunkUnregister(unregisterHost);
           console.error(
             `[sip-pbx:signaling] trunk unregister during trigger reuse failed; ref=${ref}; error=${this.errorMessage(error)}`,
           );
@@ -545,19 +563,26 @@ export class SipTransportService {
       }
       existing.credentials = credentials;
       existing.publicRef = publicRef;
-      existing.registerMode = registerMode;
+      existing.connectionMode = connectionMode;
+      existing.useRegistration = useRegistration;
       existing.advertisedIp = listener.advertisedIp;
       existing.realm = listener.realm;
+      existing.authMode = authMode;
+      existing.authorizationUsernamePrefix = authorizationUsernamePrefix;
       existing.authTimeoutMs = authTimeoutMs;
       existing.continueTraversalOnAuthReject = config.continueTraversalOnAuthReject === true;
+      existing.staticCredentials = staticCredentials;
       existing.registrationExpires = Number(config.registrationExpires || OPTION_DEFAULTS.sip.registrationExpiresSeconds);
       existing.registerHeaders = this.normalizeHeaderEntries(config.registerHeaders);
-      if (existing.registerMode) {
+      if (connectionMode !== TRUNK_CONNECTION_MODE_DYNAMIC) {
+        existing.dynamicRegistration = null;
+      }
+      if (existing.useRegistration) {
         await this.sendTrunkRegister(existing);
       }
       return;
     }
-    if (listener.bindPort > 0 && !registerMode) {
+    if (listener.bindPort > 0 && connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC) {
       this.assertSharedRealmCompatible(listener.bindIp, listener.bindPort, listener.realm);
     }
     await this.deactivateTrunkTrigger(ref);
@@ -572,16 +597,21 @@ export class SipTransportService {
       advertisedIp: normalizeSipAdvertisedHost(pickListenerValue(config.advertisedIp, credentials.publicDomain), acquired.bindIp),
       realm: listener.realm,
       credentials,
-      registerMode,
+      connectionMode,
+      useRegistration,
+      authMode,
+      authorizationUsernamePrefix,
       authTimeoutMs,
       continueTraversalOnAuthReject: config.continueTraversalOnAuthReject === true,
+      staticCredentials,
       registrationExpires: Number(config.registrationExpires || OPTION_DEFAULTS.sip.registrationExpiresSeconds),
       registerHeaders: this.normalizeHeaderEntries(config.registerHeaders),
       registrationTimer: null,
+      dynamicRegistration: null,
       registration: null,
     };
     this.trunkHosts.set(ref, host);
-    if (host.registerMode) {
+    if (host.useRegistration) {
       await this.sendTrunkRegister(host);
     }
   }
@@ -594,16 +624,20 @@ export class SipTransportService {
     this.clearTrunkRegistrationTimer(host);
     this.trunkHosts.delete(ref);
     if (host.registration) {
+      this.pendingTrunkRegisterHosts.add(host);
       try {
         await this.sendTrunkRegister(host, null, { expiresSeconds: 0 });
       } catch (error) {
+        this.finalizePendingTrunkUnregister(host);
         console.error(
           `[sip-pbx:signaling] trunk unregister during trigger deactivate failed; ref=${ref}; error=${this.errorMessage(error)}`,
         );
       }
+      return;
     }
+    host.dynamicRegistration = null;
     host.registration = null;
-    if (!this.hasActiveHostsForEndpoint(host.bindIp, host.bindPort)) {
+    if (!this.hasActiveHostsForEndpoint(host.bindIp, host.bindPort) && !this.hasPendingTrunkHostsForEndpoint(host.bindIp, host.bindPort)) {
       this.closeUdpListener(host.bindIp, host.bindPort);
     }
   }
@@ -1025,6 +1059,23 @@ export class SipTransportService {
     return this.getHostEndpoint(this.trunkHosts, ref);
   }
 
+  getTrunkDialAvailability(ref: string): { connectionMode: TrunkConnectionMode; available: boolean } | null {
+    const host = this.trunkHosts.get(ref);
+    if (!host) {
+      return null;
+    }
+    if (host.connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC) {
+      return {
+        connectionMode: TRUNK_CONNECTION_MODE_DYNAMIC,
+        available: this.getActiveDynamicTrunkRegistration(host) != null,
+      };
+    }
+    return {
+      connectionMode: TRUNK_CONNECTION_MODE_FIXED,
+      available: this.resolveFixedTrunkRemoteEndpoint(host) != null,
+    };
+  }
+
   private getHostEndpoint<H extends SipHostBase>(map: Map<string, H>, ref: string): { host: string; port: number } | null {
     const host = map.get(ref);
     if (!host) {
@@ -1046,7 +1097,7 @@ export class SipTransportService {
       return extensionRealm;
     }
     return this.listTrunkHostsForEndpoint(bindIp, bindPort)
-      .find((candidate) => !candidate.registerMode)
+      .find((candidate) => candidate.connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC)
       ?.realm || null;
   }
 
@@ -1122,9 +1173,9 @@ export class SipTransportService {
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
   ): Promise<void> {
-    const extensionsHost = this.listExtensionsHostsForEndpoint(bindIp, bindPort)[0] || null;
+    const extensionsHosts = this.listExtensionsHostsForEndpoint(bindIp, bindPort);
     const trunkHosts = this.listTrunkHostsForEndpoint(bindIp, bindPort);
-    const fallbackAdvertisedHost = extensionsHost?.advertisedIp
+    const fallbackAdvertisedHost = extensionsHosts[0]?.advertisedIp
       || trunkHosts[0]?.advertisedIp
       || normalizeSipAdvertisedHost("", bindIp);
     try {
@@ -1135,7 +1186,7 @@ export class SipTransportService {
           return;
         }
         this.noteOutboundTransactionResponse(message);
-        for (const candidate of trunkHosts) {
+        for (const candidate of this.listTrunkRegisterResponseHostsForEndpoint(bindIp, bindPort)) {
           if (await this.handleTrunkRegisterResponse(candidate, message, rinfo)) {
             return;
           }
@@ -1146,11 +1197,13 @@ export class SipTransportService {
         return;
       }
       if (message.method === "REGISTER") {
-        if (await this.handleDirectInboundTrunkByEndpoint(bindIp, bindPort, message, rinfo, "register")) {
+        if (await this.handleFixedTrunkRequestByEndpoint(bindIp, bindPort, message, rinfo, "register")) {
           return;
         }
-        if (extensionsHost) {
-          await this.handleExtensionsRequest(extensionsHost, message, rinfo, "register");
+        if (await this.handleDynamicTrunkRequestByEndpoint(bindIp, bindPort, message, rinfo, "register")) {
+          return;
+        }
+        if (await this.handleExtensionsRequestByEndpoint(bindIp, bindPort, message, rinfo, "register")) {
           return;
         }
         await this.sendNotImplementedResponse(socket, message, rinfo, fallbackAdvertisedHost, bindPort);
@@ -1162,11 +1215,13 @@ export class SipTransportService {
           await this.handleOutboundSessionMessage(outboundSession, message, rinfo);
           return;
         }
-        if (await this.handleOrderedTrunkInviteByEndpoint(bindIp, bindPort, message, rinfo)) {
+        if (await this.handleFixedTrunkRequestByEndpoint(bindIp, bindPort, message, rinfo, "invite")) {
           return;
         }
-        if (extensionsHost) {
-          await this.handleExtensionsRequest(extensionsHost, message, rinfo, "invite");
+        if (await this.handleDynamicTrunkRequestByEndpoint(bindIp, bindPort, message, rinfo, "invite")) {
+          return;
+        }
+        if (await this.handleExtensionsRequestByEndpoint(bindIp, bindPort, message, rinfo, "invite")) {
           return;
         }
         await this.sendStatelessResponse(socket, message, rinfo, 404, "Not Found", fallbackAdvertisedHost, bindPort);
@@ -1207,51 +1262,91 @@ export class SipTransportService {
     }
   }
 
-  private async handleExtensionsRequest(
-    host: ExtensionsHost,
+  private async handleExtensionsRequestByEndpoint(
+    bindIp: string,
+    bindPort: number,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
     requestType: SipAuthRequestKind,
-  ): Promise<void> {
-    if (await this.replayServerTransaction(host.socket, message, rinfo)) {
-      return;
-    }
-    const transactionKey = this.beginServerTransaction(message);
-    try {
-      const endpointExtension = this.extractEndpointExtension(message);
-      const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
-      let fallbackRejectResponse: SipAuthOutcome | null = null;
-      for (const candidate of this.listExtensionsHostsForEndpoint(host.bindIp, host.bindPort)) {
-        const authResponse = await this.resolveExtensionsAuth(candidate, message, requestType, endpointExtension, authorization, rinfo);
-        if (authResponse.notApplicable) {
-          continue;
-        }
-        if (!authResponse.allow) {
-          if (this.shouldContinueExtensionsTraversalOnAuthReject(candidate, authResponse)) {
-            fallbackRejectResponse = authResponse;
-            continue;
-          }
-          await this.sendExtensionsAuthFailure(host, message, rinfo, authResponse);
-          return;
-        }
+  ): Promise<boolean> {
+    const candidates = this.listExtensionsHostsForEndpoint(bindIp, bindPort);
+    const endpointExtension = this.extractEndpointExtension(message);
+    const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
+    return await this.handleAuthOwnedRequestByEndpoint({
+      candidates,
+      message,
+      rinfo,
+      resolveAuth: async (candidate) =>
+        await this.resolveExtensionsAuth(candidate, message, requestType, endpointExtension, authorization, rinfo),
+      shouldContinueReject: (candidate, authResponse) =>
+        this.shouldContinueExtensionsTraversalOnAuthReject(candidate, authResponse),
+      sendFailure: async (host, authResponse) =>
+        await this.sendExtensionsAuthFailure(host, message, rinfo, authResponse),
+      onAllowed: async (candidate, authResponse) => {
         const extensionFallback = requestType === "register" ? endpointExtension : "";
         const extensionNumber = String(authResponse.extension || extensionFallback || "").trim();
         if (!extensionNumber) {
-          await this.sendExtensionsAuthFailure(host, message, rinfo, { statusCode: 403, reasonPhrase: "Missing Extension" });
-          return;
+          return {
+            status: SIP_AUTH_OUTCOME_REJECT,
+            statusCode: 403,
+            reasonPhrase: "Missing Extension",
+          };
         }
         if (requestType === "register") {
           await this.completeExtensionsRegister(candidate, message, rinfo, extensionNumber);
         } else {
           await this.startInboundExtensionInvite(candidate, message, rinfo, extensionNumber);
         }
-        return;
+        return null;
+      },
+    });
+  }
+
+  private async handleAuthOwnedRequestByEndpoint<H extends SipHostBase>(input: {
+    candidates: H[];
+    message: SipMessage;
+    rinfo: dgram.RemoteInfo;
+    resolveAuth: (candidate: H) => Promise<SipAuthOutcome>;
+    shouldContinueReject: (candidate: H, authResponse: SipAuthOutcome) => boolean;
+    sendFailure: (host: H, authResponse: SipAuthOutcome) => Promise<void>;
+    onAllowed: (candidate: H, authResponse: SipAuthOutcome) => Promise<SipAuthOutcome | null>;
+  }): Promise<boolean> {
+    const host = input.candidates[0] || null;
+    if (!host) {
+      return false;
+    }
+    if (await this.replayServerTransaction(host.socket, input.message, input.rinfo)) {
+      return true;
+    }
+    const transactionKey = this.beginServerTransaction(input.message);
+    try {
+      let fallbackRejectResponse: SipAuthOutcome | null = null;
+      for (const candidate of input.candidates) {
+        const authResponse = await input.resolveAuth(candidate);
+        if (authResponse.status === SIP_AUTH_OUTCOME_NOT_APPLICABLE) {
+          continue;
+        }
+        if (authResponse.status !== SIP_AUTH_OUTCOME_ALLOWED) {
+          if (input.shouldContinueReject(candidate, authResponse)) {
+            fallbackRejectResponse = authResponse;
+            continue;
+          }
+          await input.sendFailure(host, authResponse);
+          return true;
+        }
+        const allowedFailure = await input.onAllowed(candidate, authResponse);
+        if (allowedFailure) {
+          await input.sendFailure(host, allowedFailure);
+          return true;
+        }
+        return true;
       }
       if (fallbackRejectResponse) {
-        await this.sendExtensionsAuthFailure(host, message, rinfo, fallbackRejectResponse);
-        return;
+        await input.sendFailure(host, fallbackRejectResponse);
+        return true;
       }
-      await this.sendStatelessResponse(host.socket, message, rinfo, 404, "Not Found", host.advertisedIp, host.bindPort);
+      this.clearServerTransaction(transactionKey);
+      return false;
     } catch (error) {
       this.clearServerTransaction(transactionKey);
       throw error;
@@ -1626,6 +1721,7 @@ export class SipTransportService {
       lastNonce: nonce,
       nonceCount,
       authAttempts: challenge ? (registration?.authAttempts || 0) + 1 : 0,
+      unregistering: expiresSeconds === 0,
     };
     const registerRequest = formatSipRequest({
       method: "REGISTER",
@@ -1647,6 +1743,10 @@ export class SipTransportService {
     try {
       await this.sendTrackedRequest(host.socket, registerRequest, effectiveRemoteAddress, effectiveRemotePort, {
         onTimeout: () => {
+          if (host.registration?.unregistering) {
+            this.finalizePendingTrunkUnregister(host);
+            return;
+          }
           this.scheduleTrunkRegistrationRetry(host, SIP_REGISTER_RETRY_DELAY_MS);
         },
       });
@@ -1662,11 +1762,15 @@ export class SipTransportService {
       return false;
     }
     const callId = String(getSipHeader(message, "call-id") || "").trim();
-    if (!host.registerMode || !host.registration || !callId || host.registration.callId !== callId) {
+    if (!host.useRegistration || !host.registration || !callId || host.registration.callId !== callId) {
       return false;
     }
     const statusCode = Number(message.statusCode || 0);
     if (statusCode >= 200 && statusCode < 300) {
+      if (host.registration?.unregistering) {
+        this.finalizePendingTrunkUnregister(host);
+        return true;
+      }
       const contact = parseContactHeader(getSipHeader(message, "contact"));
       const expires = this.resolveRegisterExpires(message, contact.parameters);
       if (host.registration) {
@@ -1676,6 +1780,10 @@ export class SipTransportService {
       return true;
     }
     if (statusCode === 423) {
+      if (host.registration?.unregistering) {
+        this.finalizePendingTrunkUnregister(host);
+        return true;
+      }
       const minExpires = Number(getSipHeader(message, "min-expires") || NaN);
       if (Number.isFinite(minExpires) && minExpires > 0) {
         host.registrationExpires = minExpires;
@@ -1686,6 +1794,10 @@ export class SipTransportService {
       return true;
     }
     if (statusCode !== 401 && statusCode !== 407) {
+      if (host.registration?.unregistering) {
+        this.finalizePendingTrunkUnregister(host);
+        return true;
+      }
       this.scheduleTrunkRegistrationRetry(host, this.resolveRetryAfterMs(message, SIP_REGISTER_RETRY_DELAY_MS));
       return true;
     }
@@ -1700,6 +1812,10 @@ export class SipTransportService {
       return true;
     }
     if ((host.registration?.authAttempts || 0) >= 2) {
+      if (host.registration?.unregistering) {
+        this.finalizePendingTrunkUnregister(host);
+        return true;
+      }
       this.scheduleTrunkRegistrationRetry(host, SIP_REGISTER_RETRY_DELAY_MS);
       return true;
     }
@@ -1708,18 +1824,18 @@ export class SipTransportService {
       headerName: authHeaderName,
       remoteAddress: rinfo.address,
       remotePort: rinfo.port,
-    });
+    }, host.registration?.unregistering ? { expiresSeconds: 0 } : undefined);
     return true;
   }
 
   private scheduleTrunkRegistrationTask(host: TrunkHost, delayMs: number, label: string): void {
     this.clearTrunkRegistrationTimer(host);
-    if (!Number.isFinite(delayMs) || delayMs <= 0 || !host.registerMode) {
+    if (!Number.isFinite(delayMs) || delayMs <= 0 || !host.useRegistration) {
       return;
     }
     host.registrationTimer = setTimeout(() => {
       host.registrationTimer = null;
-      if (!this.trunkHosts.has(host.ref) || !host.registerMode) {
+      if (!this.trunkHosts.has(host.ref) || !host.useRegistration) {
         return;
       }
       void this.sendTrunkRegister(host).catch((error) => {
@@ -1752,6 +1868,16 @@ export class SipTransportService {
     }
     clearTimeout(host.registrationTimer);
     host.registrationTimer = null;
+  }
+
+  private finalizePendingTrunkUnregister(host: TrunkHost): void {
+    this.clearTrunkRegistrationTimer(host);
+    this.pendingTrunkRegisterHosts.delete(host);
+    host.dynamicRegistration = null;
+    host.registration = null;
+    if (!this.hasActiveHostsForEndpoint(host.bindIp, host.bindPort) && !this.hasPendingTrunkHostsForEndpoint(host.bindIp, host.bindPort)) {
+      this.closeUdpListener(host.bindIp, host.bindPort);
+    }
   }
 
   private resolveRetryAfterMs(message: SipMessage, fallbackMs: number): number {
@@ -1827,10 +1953,10 @@ export class SipTransportService {
     scopeKey: string,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
-    response: { statusCode?: number; reasonPhrase?: string; stale?: boolean; challenge?: boolean },
+    response: SipAuthOutcome,
   ): Promise<void> {
     const statusCode = Number(response.statusCode || 401);
-    const challengeNonce = response.challenge === true && (statusCode === 401 || statusCode === 407)
+    const challengeNonce = response.status === SIP_AUTH_OUTCOME_CHALLENGE && (statusCode === 401 || statusCode === 407)
       ? this.extensionsDigestNonces.issue(scopeKey, host.realm)
       : null;
     await this.sendStatelessResponse(host.socket, message, rinfo, statusCode, String(response.reasonPhrase || "Unauthorized"), host.advertisedIp, host.bindPort, {
@@ -1884,17 +2010,21 @@ export class SipTransportService {
     const scopeKey = this.extensionNonceScope(host);
     const normalizedAuthorizationUsername = this.resolveNormalizedAuthorizationUsername(host, authorization);
     if (authorization && host.authMode !== "raw" && !normalizedAuthorizationUsername.applicable) {
-      return { allow: false, notApplicable: true };
+      return { status: SIP_AUTH_OUTCOME_NOT_APPLICABLE };
     }
     const username = authorization
       ? normalizedAuthorizationUsername.username
       : String(endpointExtension || "");
     const publicAuthorizationState = this.resolvePublicHostAuthorization(host, scopeKey, authorization);
     if (host.authMode === "static") {
-      return this.resolveStaticAuth(host, message, endpointExtension, authorization, normalizedAuthorizationUsername.username);
+      return this.resolveStaticAuth(host, message, endpointExtension, authorization, normalizedAuthorizationUsername.username, {
+        matchByExtension: true,
+        includeExtensionResult: true,
+        nonceScope: scopeKey,
+      });
     }
     if (host.authMode === "digest-first" && !authorization) {
-      return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
+      return { status: SIP_AUTH_OUTCOME_CHALLENGE, statusCode: 401, reasonPhrase: "Unauthorized" };
     }
     const requestContext = this.buildAuthRequestContext({
       host,
@@ -1928,7 +2058,7 @@ export class SipTransportService {
   }
 
   private resolveNormalizedAuthorizationUsername(
-    host: ExtensionsHost,
+    host: { authMode: string; authorizationUsernamePrefix: string },
     authorization: ReturnType<typeof parseSipAuthorization>,
   ): { applicable: boolean; username: string } {
     const rawUsername = String((authorization && authorization.params?.username) || "").trim();
@@ -1950,24 +2080,31 @@ export class SipTransportService {
   }
 
   private resolveStaticAuth(
-    host: ExtensionsHost,
+    host: ExtensionsHost | TrunkHost,
     message: SipMessage,
     endpointExtension: string,
     authorization: ReturnType<typeof parseSipAuthorization>,
     normalizedAuthorizationUsername: string,
+    options?: { matchByExtension?: boolean; includeExtensionResult?: boolean; nonceScope?: string },
   ): SipAuthOutcome {
     if (!authorization) {
-      return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
+      return { status: SIP_AUTH_OUTCOME_CHALLENGE, statusCode: 401, reasonPhrase: "Unauthorized" };
     }
     const username = String(normalizedAuthorizationUsername || endpointExtension || "").trim();
     const verificationUsername = String((authorization && authorization.params?.username) || "").trim();
-    const credential = host.staticCredentials.find((entry) => entry.username === username || entry.extension === endpointExtension);
+    const matchByExtension = options?.matchByExtension !== false;
+    const includeExtensionResult = options?.includeExtensionResult !== false;
+    const nonceScope = String(options?.nonceScope || this.extensionNonceScope(host as ExtensionsHost));
+    const credential = host.staticCredentials.find((entry) =>
+      entry.username === username
+      || (matchByExtension && entry.extension === endpointExtension),
+    );
     if (!credential) {
-      return { allow: false, notApplicable: true };
+      return { status: SIP_AUTH_OUTCOME_NOT_APPLICABLE };
     }
     const verified = this.verifyHostDigestAuthorization(
       host,
-      this.extensionNonceScope(host),
+      nonceScope,
       message,
       authorization,
       verificationUsername || credential.username || username,
@@ -1975,10 +2112,12 @@ export class SipTransportService {
     );
     if (!verified.ok) {
       return verified.invalidNonce
-        ? { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", stale: verified.stale, challenge: true }
-        : { allow: false, statusCode: 403, reasonPhrase: "Forbidden" };
+        ? { status: SIP_AUTH_OUTCOME_CHALLENGE, statusCode: 401, reasonPhrase: "Unauthorized", stale: verified.stale }
+        : { status: SIP_AUTH_OUTCOME_REJECT, statusCode: 403, reasonPhrase: "Forbidden" };
     }
-    return { allow: true, extension: credential.extension || endpointExtension || credential.username };
+    return includeExtensionResult
+      ? { status: SIP_AUTH_OUTCOME_ALLOWED, extension: credential.extension || endpointExtension || credential.username }
+      : { status: SIP_AUTH_OUTCOME_ALLOWED };
   }
 
   private applyInteractiveAuthResponse(
@@ -1997,20 +2136,20 @@ export class SipTransportService {
     const extensionFallback = String(options.extensionFallback || "").trim();
     const resolveExtension = (): SipAuthOutcome => {
       if (!options.requiresExtension) {
-        return { allow: true };
+        return { status: SIP_AUTH_OUTCOME_ALLOWED };
       }
       const extension = String(response.extension || extensionFallback || "").trim();
       if (!extension) {
-        return { allow: false, statusCode: 403, reasonPhrase: "Missing Extension" };
+        return { status: SIP_AUTH_OUTCOME_REJECT, statusCode: 403, reasonPhrase: "Missing Extension" };
       }
-      return { allow: true, extension };
+      return { status: SIP_AUTH_OUTCOME_ALLOWED, extension };
     };
     if (response.action === "allow") {
       return resolveExtension();
     }
     if (response.action === "verify_password") {
       if (!authorization) {
-        return { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", challenge: true };
+        return { status: SIP_AUTH_OUTCOME_CHALLENGE, statusCode: 401, reasonPhrase: "Unauthorized" };
       }
       const password = String(response.password || "");
       const verified = this.verifyHostDigestAuthorization(host, scopeKey, message, authorization, options.verifyUsername, password);
@@ -2018,24 +2157,23 @@ export class SipTransportService {
         return resolveExtension();
       }
       return verified.invalidNonce
-        ? { allow: false, statusCode: 401, reasonPhrase: "Unauthorized", stale: verified.stale, challenge: true }
-        : { allow: false, statusCode: 403, reasonPhrase: "Forbidden" };
+        ? { status: SIP_AUTH_OUTCOME_CHALLENGE, statusCode: 401, reasonPhrase: "Unauthorized", stale: verified.stale }
+        : { status: SIP_AUTH_OUTCOME_REJECT, statusCode: 403, reasonPhrase: "Forbidden" };
     }
     if (response.action === "deny") {
       return {
-        allow: false,
+        status: SIP_AUTH_OUTCOME_REJECT,
         statusCode: Number(response.statusCode || 403),
         reasonPhrase: String(response.reason || "Forbidden"),
       };
     }
     if (response.action === "not_applicable") {
-      return { allow: false, notApplicable: true };
+      return { status: SIP_AUTH_OUTCOME_NOT_APPLICABLE };
     }
     return {
-      allow: false,
+      status: SIP_AUTH_OUTCOME_CHALLENGE,
       statusCode: Number(response.statusCode || 401),
       reasonPhrase: "Unauthorized",
-      challenge: response.action === "challenge",
       stale: response.action === "challenge"
         ? this.resolveHostChallengeStale(host, scopeKey, authorization, options.prevalidatedStale)
         : false,
@@ -2047,16 +2185,14 @@ export class SipTransportService {
     response: SipAuthOutcome,
   ): boolean {
     return host.continueTraversalOnAuthReject === true
-      && !response.allow
-      && !response.notApplicable
-      && response.challenge !== true;
+      && response.status === SIP_AUTH_OUTCOME_REJECT;
   }
 
   private sendExtensionsAuthFailure(
     host: ExtensionsHost,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
-    response: { statusCode?: number; reasonPhrase?: string; stale?: boolean; challenge?: boolean },
+    response: SipAuthOutcome,
   ): Promise<void> {
     return this.sendHostAuthFailure(host, this.extensionNonceScope(host), message, rinfo, response);
   }
@@ -2065,7 +2201,7 @@ export class SipTransportService {
     host: TrunkHost,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
-    response: { statusCode?: number; reasonPhrase?: string; stale?: boolean; challenge?: boolean },
+    response: SipAuthOutcome,
   ): Promise<void> {
     return this.sendHostAuthFailure(host, this.trunkNonceScope(host), message, rinfo, response);
   }
@@ -2075,9 +2211,7 @@ export class SipTransportService {
     response: SipAuthOutcome,
   ): boolean {
     return host.continueTraversalOnAuthReject === true
-      && !response.allow
-      && !response.notApplicable
-      && response.challenge !== true;
+      && response.status === SIP_AUTH_OUTCOME_REJECT;
   }
 
   private async sendNotImplementedResponse(
@@ -2680,6 +2814,34 @@ export class SipTransportService {
     const trunkHost = dial.mode === "trunk"
       ? this.trunkHosts.get(String(dial.metadata.ref || "").trim()) || null
       : null;
+    if (trunkHost && trunkHost.connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC) {
+      const binding = this.getActiveDynamicTrunkRegistration(trunkHost);
+      if (!binding) {
+        return null;
+      }
+      const contact = parseSipUri(binding.contactUri);
+      const remoteAddress = String(binding.sourceIp || contact?.host || "").trim();
+      const remotePort = Number(binding.sourcePort || contact?.port || OPTION_DEFAULTS.sip.port);
+      const requestDomain = String(contact?.host || remoteAddress).trim();
+      const requestUri = buildOutboundRequestUri(destinationUser, requestDomain, remotePort);
+      if (!remoteAddress || !requestUri) {
+        return null;
+      }
+      return {
+        socket: trunkHost.socket,
+        ownsSocket: false,
+        requestUri,
+        remoteAddress,
+        remotePort,
+        localBindIp: trunkHost.bindIp,
+        localBindPort: trunkHost.bindPort,
+        publicHost: normalizeSipAdvertisedHost(trunkHost.advertisedIp, trunkHost.bindIp),
+        callerUser: String(dial.metadata.callerNumber || "n8n"),
+        authUsername: "",
+        authPassword: "",
+        headers,
+      };
+    }
     const credentials = trunkHost
       ? trunkHost.credentials
       : ((dial.metadata.sipCredentials && typeof dial.metadata.sipCredentials === "object")
@@ -2743,6 +2905,52 @@ export class SipTransportService {
     return Boolean(requestUri && requestUri.parameters["n8n-route"] === host.routeToken);
   }
 
+  private resolveFixedTrunkRemoteEndpoint(host: TrunkHost): { address: string; port: number } | null {
+    const address = String(host.credentials.proxyServer || host.credentials.sipServer || "").trim();
+    if (!address) {
+      return null;
+    }
+    const port = Number(host.credentials.port || OPTION_DEFAULTS.sip.port);
+    return { address, port: Number.isFinite(port) && port > 0 ? port : OPTION_DEFAULTS.sip.port };
+  }
+
+  private matchesFixedTrunkRemote(host: TrunkHost, rinfo: dgram.RemoteInfo): boolean {
+    const remote = this.resolveFixedTrunkRemoteEndpoint(host);
+    return Boolean(remote && remote.address === rinfo.address && remote.port === rinfo.port);
+  }
+
+  private getActiveDynamicTrunkRegistration(host: TrunkHost): {
+    contactUri: string;
+    sourceIp: string;
+    sourcePort: number;
+    expiresAt: number | null;
+  } | null {
+    const binding = host.dynamicRegistration;
+    if (!binding) {
+      return null;
+    }
+    if (binding.expiresAt != null && binding.expiresAt > 0 && binding.expiresAt <= Date.now()) {
+      host.dynamicRegistration = null;
+      return null;
+    }
+    return binding;
+  }
+
+  private updateDynamicTrunkRegistration(host: TrunkHost, message: SipMessage, rinfo: dgram.RemoteInfo): void {
+    const contact = parseContactHeader(getSipHeader(message, "contact"));
+    const expires = Math.max(0, this.resolveRegisterExpires(message, contact.parameters));
+    if (expires <= 0 || !contact.uri) {
+      host.dynamicRegistration = null;
+      return;
+    }
+    host.dynamicRegistration = {
+      contactUri: contact.uri,
+      sourceIp: rinfo.address,
+      sourcePort: rinfo.port,
+      expiresAt: Date.now() + (expires * 1000),
+    };
+  }
+
   private trunkNonceScope(host: TrunkHost): string {
     return `trunk:${host.bindIp}:${host.bindPort}`;
   }
@@ -2768,6 +2976,31 @@ export class SipTransportService {
     return this.listHostsForEndpoint(this.trunkHosts, bindIp, bindPort);
   }
 
+  private listTrunkRegisterResponseHostsForEndpoint(bindIp: string, bindPort: number): TrunkHost[] {
+    return [
+      ...this.listTrunkHostsForEndpoint(bindIp, bindPort),
+      ...Array.from(this.pendingTrunkRegisterHosts.values())
+        .filter((host) => host.bindIp === bindIp && host.bindPort === bindPort),
+    ];
+  }
+
+  private hasPendingTrunkHostsForEndpoint(bindIp: string, bindPort: number): boolean {
+    return Array.from(this.pendingTrunkRegisterHosts.values())
+      .some((host) => host.bindIp === bindIp && host.bindPort === bindPort);
+  }
+
+  private cloneTrunkHostForPendingUnregister(host: TrunkHost): TrunkHost {
+    return {
+      ...host,
+      credentials: { ...(host.credentials || {}) },
+      staticCredentials: host.staticCredentials.map((entry) => ({ ...entry })),
+      registerHeaders: host.registerHeaders.map((entry) => ({ ...entry })),
+      dynamicRegistration: host.dynamicRegistration ? { ...host.dynamicRegistration } : null,
+      registration: host.registration ? { ...host.registration } : null,
+      registrationTimer: null,
+    };
+  }
+
   private extractTrunkRequestUser(message: SipMessage): string {
     const requestUser = String(parseSipUri(String(message.requestUri || ""))?.user || "").trim();
     if (requestUser) {
@@ -2787,12 +3020,25 @@ export class SipTransportService {
     authorization: ReturnType<typeof parseSipAuthorization>,
     rinfo: dgram.RemoteInfo,
   ): Promise<SipAuthOutcome> {
-    if (host.registerMode) {
-      return { allow: false, notApplicable: true };
+    if (host.connectionMode !== TRUNK_CONNECTION_MODE_DYNAMIC) {
+      return { status: SIP_AUTH_OUTCOME_NOT_APPLICABLE };
     }
+    const normalizedAuthorizationUsername = this.resolveNormalizedAuthorizationUsername(host, authorization);
     const scopeKey = this.trunkNonceScope(host);
+    if (host.authMode === "static") {
+      return this.resolveStaticAuth(host, message, "", authorization, normalizedAuthorizationUsername.username, {
+        matchByExtension: false,
+        includeExtensionResult: false,
+        nonceScope: scopeKey,
+      });
+    }
+    if (host.authMode === "digest-first" && !authorization) {
+      return { status: SIP_AUTH_OUTCOME_CHALLENGE, statusCode: 401, reasonPhrase: "Unauthorized" };
+    }
     const publicAuthorizationState = this.resolvePublicHostAuthorization(host, scopeKey, authorization);
-    const username = String((authorization && authorization.params?.username) || this.extractTrunkRequestUser(message) || "").trim();
+    const username = authorization
+      ? normalizedAuthorizationUsername.username
+      : String(this.extractTrunkRequestUser(message) || "").trim();
     const requestContext = this.buildAuthRequestContext({
       host,
       message,
@@ -2817,36 +3063,35 @@ export class SipTransportService {
       authorization,
       response,
       {
-        verifyUsername: String(authorization?.params?.username || this.extractTrunkRequestUser(message) || "").trim(),
+        verifyUsername: String((authorization && authorization.params?.username) || "").trim() || normalizedAuthorizationUsername.username,
         prevalidatedStale: publicAuthorizationState.stale,
       },
     );
   }
 
-  private async handleDirectInboundTrunkByEndpoint(
+  private async handleFixedTrunkRequestByEndpoint(
     bindIp: string,
     bindPort: number,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
     requestType: SipAuthRequestKind,
   ): Promise<boolean> {
-    const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
-    let fallbackRejectResponse: SipAuthOutcome | null = null;
-    let fallbackRejectHost: TrunkHost | null = null;
-    for (const candidate of this.listTrunkHostsForEndpoint(bindIp, bindPort)) {
-      const authResponse = await this.resolveTrunkAuth(candidate, message, requestType, authorization, rinfo);
-      if (authResponse.notApplicable) {
-        continue;
-      }
-      if (!authResponse.allow) {
-        if (this.shouldContinueTrunkTraversalOnAuthReject(candidate, authResponse)) {
-          fallbackRejectResponse = authResponse;
-          fallbackRejectHost = candidate;
-          continue;
-        }
-        return await this.processInboundServerTransaction(candidate.socket, message, rinfo, async () => {
-          await this.sendTrunkAuthFailure(candidate, message, rinfo, authResponse);
+    const candidates = this.listTrunkHostsForEndpoint(bindIp, bindPort);
+    if (requestType === "invite") {
+      const routeMatched = candidates.find((candidate) =>
+        candidate.useRegistration
+        && this.hasValidTrunkRouteToken(candidate, message)
+        && this.matchesFixedTrunkRemote(candidate, rinfo)
+      ) || null;
+      if (routeMatched) {
+        return await this.processInboundServerTransaction(routeMatched.socket, message, rinfo, async () => {
+          await this.startInboundTrunkInvite(routeMatched, message, rinfo);
         });
+      }
+    }
+    for (const candidate of candidates) {
+      if (candidate.connectionMode !== TRUNK_CONNECTION_MODE_FIXED || candidate.useRegistration || !this.matchesFixedTrunkRemote(candidate, rinfo)) {
+        continue;
       }
       return await this.processInboundServerTransaction(candidate.socket, message, rinfo, async () => {
         if (requestType === "register") {
@@ -2860,28 +3105,51 @@ export class SipTransportService {
         }
       });
     }
-    if (fallbackRejectResponse && fallbackRejectHost) {
-      return await this.processInboundServerTransaction(fallbackRejectHost.socket, message, rinfo, async () => {
-        await this.sendTrunkAuthFailure(fallbackRejectHost, message, rinfo, fallbackRejectResponse);
-      });
-    }
     return false;
   }
 
-  private async handleOrderedTrunkInviteByEndpoint(
+  private async handleDynamicTrunkRequestByEndpoint(
     bindIp: string,
     bindPort: number,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
+    requestType: SipAuthRequestKind,
   ): Promise<boolean> {
     const candidates = this.listTrunkHostsForEndpoint(bindIp, bindPort);
-    const routeMatched = candidates.find((candidate) => candidate.registerMode && this.hasValidTrunkRouteToken(candidate, message)) || null;
-    if (routeMatched) {
-      return await this.processInboundServerTransaction(routeMatched.socket, message, rinfo, async () => {
-        await this.startInboundTrunkInvite(routeMatched, message, rinfo);
-      });
-    }
-    return await this.handleDirectInboundTrunkByEndpoint(bindIp, bindPort, message, rinfo, "invite");
+    const dynamicCandidates = candidates.filter((candidate) => candidate.connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC);
+    const authorization = parseSipAuthorization(getSipHeader(message, "authorization"));
+    return await this.handleAuthOwnedRequestByEndpoint({
+      candidates: dynamicCandidates,
+      message,
+      rinfo,
+      resolveAuth: async (candidate) =>
+        await this.resolveTrunkAuth(candidate, message, requestType, authorization, rinfo),
+      shouldContinueReject: (candidate, authResponse) =>
+        this.shouldContinueTrunkTraversalOnAuthReject(candidate, authResponse),
+      sendFailure: async (host, authResponse) =>
+        await this.sendTrunkAuthFailure(host, message, rinfo, authResponse),
+      onAllowed: async (candidate) => {
+        if (requestType === "register") {
+          await this.completeDynamicTrunkRegister(candidate, message, rinfo);
+        } else {
+          await this.startInboundTrunkInvite(candidate, message, rinfo);
+        }
+        return null;
+      },
+    });
+  }
+
+  private async completeDynamicTrunkRegister(
+    candidate: TrunkHost,
+    message: SipMessage,
+    rinfo: dgram.RemoteInfo,
+  ): Promise<void> {
+    this.updateDynamicTrunkRegistration(candidate, message, rinfo);
+    const contact = parseContactHeader(getSipHeader(message, "contact"));
+    const expires = this.resolveRegisterExpires(message, contact.parameters);
+    await this.sendStatelessResponse(candidate.socket, message, rinfo, 200, "OK", candidate.advertisedIp, candidate.bindPort, {
+      Contact: contact.uri ? `<${contact.uri}>;expires=${Math.max(0, expires)}` : undefined,
+    });
   }
 
   private resolveRegisterExpires(message: SipMessage, contactParameters: Record<string, string>): number {

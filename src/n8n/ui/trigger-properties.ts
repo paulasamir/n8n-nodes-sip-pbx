@@ -8,6 +8,11 @@ import {
   type UiProperty,
 } from "./description-fragments";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
+import {
+  TRUNK_CONNECTION_MODE_DYNAMIC,
+  TRUNK_CONNECTION_MODE_FIXED,
+  type TrunkConnectionMode,
+} from "../../shared/trunk-trigger";
 
 const EXTENSIONS_USERNAME_PREFIX_HINT =
   "The trigger is applicable only when SIP Authorization username starts with this prefix. The prefix is for trigger matching and stripped only for Static credential username lookup. Public auth.username and raw stay unchanged.";
@@ -58,9 +63,51 @@ function buildContinueTraversalOnAuthRejectProperty(defaultValue: boolean): UiPr
   };
 }
 
-function buildTrunkOptions(registerMode: boolean, recording: boolean): UiProperty[] {
+function buildAuthModeProperty(name: string, show: Record<string, unknown>, defaultValue: "static" | "digest-first" | "raw"): UiProperty {
+  return {
+    displayName: "Auth Mode",
+    name,
+    type: "options",
+    default: defaultValue,
+    displayOptions: { show },
+    options: [
+      { name: "Static", value: "static" },
+      { name: "Digest First", value: "digest-first" },
+      { name: "Raw", value: "raw" },
+    ],
+  };
+}
+
+function buildTrunkStaticCredentialProperties(show: Record<string, unknown>): UiProperty[] {
+  return [
+    {
+      displayName: "Username",
+      name: "trunkStaticUsername",
+      type: "string",
+      default: "",
+      required: true,
+      displayOptions: { show },
+    },
+    {
+      displayName: "Password",
+      name: "trunkStaticPassword",
+      type: "string",
+      typeOptions: { password: true },
+      default: "",
+      required: true,
+      displayOptions: { show },
+    },
+  ];
+}
+
+function buildTrunkOptions(
+  connectionMode: TrunkConnectionMode,
+  useRegistration: boolean,
+  recording: boolean,
+  authMode: "static" | "digest-first" | "raw",
+): UiProperty[] {
   const entries: UiProperty[] = [];
-  if (registerMode) {
+  if (connectionMode === TRUNK_CONNECTION_MODE_FIXED && useRegistration) {
     entries.push({
       displayName: "Registration Expires (Seconds)",
       name: "registrationExpires",
@@ -68,10 +115,12 @@ function buildTrunkOptions(registerMode: boolean, recording: boolean): UiPropert
       default: OPTION_DEFAULTS.sip.registrationExpiresSeconds,
     });
     entries.push(buildHeadersCollectionProperty("REGISTER Headers", "registerHeaders", {}));
-  } else {
-    entries.push(buildAuthTimeoutOption(OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds));
-    entries.push(buildContinueTraversalOnAuthRejectProperty(OPTION_DEFAULTS.trigger.trunk.continueTraversalOnAuthReject));
+  } else if (connectionMode === TRUNK_CONNECTION_MODE_DYNAMIC) {
+    if (authMode !== "static") {
+      entries.push(buildAuthTimeoutOption(OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds));
+    }
     entries.push(...buildSipListenerOptionEntries("trunk"));
+    entries.push(buildContinueTraversalOnAuthRejectProperty(OPTION_DEFAULTS.trigger.trunk.continueTraversalOnAuthReject));
   }
   if (recording) {
     entries.push(buildRecordResponseTimeoutOption(OPTION_DEFAULTS.trigger.trunk.recordResponseTimeoutSeconds));
@@ -96,19 +145,35 @@ function buildExtensionsOptions(authMode: "static" | "digest-first" | "raw", rec
 }
 
 export function buildTriggerNodeProperties(): UiProperty[] {
-  const trunkAuthModes: Array<["register" | "auth", boolean]> = [
-    ["register", false],
-    ["auth", false],
-    ["auth", true],
-    ["register", true],
+  const trunkVariants: Array<[TrunkConnectionMode, boolean, boolean, "static" | "digest-first" | "raw"]> = [
+    [TRUNK_CONNECTION_MODE_FIXED, false, false, "raw"],
+    [TRUNK_CONNECTION_MODE_FIXED, false, true, "raw"],
+    [TRUNK_CONNECTION_MODE_FIXED, true, false, "raw"],
+    [TRUNK_CONNECTION_MODE_FIXED, true, true, "raw"],
+    [TRUNK_CONNECTION_MODE_DYNAMIC, false, false, "static"],
+    [TRUNK_CONNECTION_MODE_DYNAMIC, false, false, "digest-first"],
+    [TRUNK_CONNECTION_MODE_DYNAMIC, false, false, "raw"],
+    [TRUNK_CONNECTION_MODE_DYNAMIC, false, true, "static"],
+    [TRUNK_CONNECTION_MODE_DYNAMIC, false, true, "digest-first"],
+    [TRUNK_CONNECTION_MODE_DYNAMIC, false, true, "raw"],
   ];
-  const trunkOptionsProperties = trunkAuthModes.map(([registerMode, recording]) =>
-    buildAddOptionsCollectionProperty(
+  const trunkOptionsProperties = trunkVariants.map(([connectionMode, useRegistration, recording, authMode]) => {
+    const show: Record<string, string[] | boolean[]> = {
+      triggerOn: ["trunk"],
+      trunkConnectionMode: [connectionMode],
+      enableCallRecording: [recording],
+    };
+    if (connectionMode === TRUNK_CONNECTION_MODE_FIXED) {
+      show.trunkUseRegistration = [useRegistration];
+    } else {
+      show.authMode = [authMode];
+    }
+    return buildAddOptionsCollectionProperty(
       "trunkOptions",
-      { triggerOn: ["trunk"], trunkRegisterMode: [registerMode], enableCallRecording: [recording] },
-      buildTrunkOptions(registerMode === "register", recording),
-    ),
-  );
+      show,
+      buildTrunkOptions(connectionMode, useRegistration, recording, authMode),
+    );
+  });
 
   const extensionsVariants: Array<["static" | "digest-first" | "raw", boolean]> = [
     ["static", false],
@@ -169,15 +234,15 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayOptions: { show: { triggerOn: ["trunk"] } },
     },
     {
-      displayName: "Connection role",
-      name: "trunkRegisterMode",
+      displayName: "Connection mode",
+      name: "trunkConnectionMode",
       type: "options",
-      default: OPTION_DEFAULTS.trigger.trunk.registerMode,
+      default: OPTION_DEFAULTS.trigger.trunk.connectionMode,
       required: true,
       displayOptions: { show: { triggerOn: ["trunk"] } },
       options: [
-        { name: "Outgoing Registration", value: "register" },
-        { name: "Inbound Authorization", value: "auth" },
+        { name: "Fixed Address", value: TRUNK_CONNECTION_MODE_FIXED },
+        { name: "Dynamic Address", value: TRUNK_CONNECTION_MODE_DYNAMIC },
       ],
     },
     {
@@ -185,8 +250,25 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       name: "sipPbxExternal",
       type: "credentials",
       default: "",
-      displayOptions: { show: { triggerOn: ["trunk"], trunkRegisterMode: ["register"] } },
+      displayOptions: { show: { triggerOn: ["trunk"], trunkConnectionMode: [TRUNK_CONNECTION_MODE_FIXED] } },
     },
+    {
+      displayName: "Use registration",
+      name: "trunkUseRegistration",
+      type: "boolean",
+      default: OPTION_DEFAULTS.trigger.trunk.useRegistration,
+      displayOptions: { show: { triggerOn: ["trunk"], trunkConnectionMode: [TRUNK_CONNECTION_MODE_FIXED] } },
+    },
+    buildAuthModeProperty(
+      "authMode",
+      { triggerOn: ["trunk"], trunkConnectionMode: [TRUNK_CONNECTION_MODE_DYNAMIC] },
+      OPTION_DEFAULTS.trigger.trunk.authMode,
+    ),
+    ...buildTrunkStaticCredentialProperties({
+      triggerOn: ["trunk"],
+      trunkConnectionMode: [TRUNK_CONNECTION_MODE_DYNAMIC],
+      authMode: ["static"],
+    }),
     { displayName: "Global Call Recording", name: "enableCallRecording", type: "boolean", default: OPTION_DEFAULTS.trigger.trunk.enableCallRecording, displayOptions: { show: { triggerOn: ["trunk"] } } },
     ...trunkOptionsProperties,
 
@@ -199,18 +281,7 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       description: REF_HINT,
       displayOptions: { show: { triggerOn: ["extensions"] } },
     },
-    {
-      displayName: "Auth Mode",
-      name: "authMode",
-      type: "options",
-      default: OPTION_DEFAULTS.trigger.extensions.authMode,
-      displayOptions: { show: { triggerOn: ["extensions"] } },
-      options: [
-        { name: "Static", value: "static" },
-        { name: "Digest First", value: "digest-first" },
-        { name: "Raw", value: "raw" },
-      ],
-    },
+    buildAuthModeProperty("authMode", { triggerOn: ["extensions"] }, OPTION_DEFAULTS.trigger.extensions.authMode),
     buildStaticCredentialsCollectionProperty("staticCredentials", { triggerOn: ["extensions"], authMode: ["static"] }),
     { displayName: "Global Call Recording", name: "extensionsEnableCallRecording", type: "boolean", default: OPTION_DEFAULTS.trigger.extensions.enableCallRecording, displayOptions: { show: { triggerOn: ["extensions"] } } },
     ...extensionsOptionsProperties,

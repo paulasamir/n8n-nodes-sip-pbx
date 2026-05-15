@@ -622,6 +622,9 @@ export class SipPbxDaemon {
     if (!config) {
       return null;
     }
+    if (String(config.authMode || OPTION_DEFAULTS.trigger.trunk.authMode) === "static") {
+      return null;
+    }
     const timeoutMs = Math.max(0, Math.round(Number(config.authTimeoutSeconds || OPTION_DEFAULTS.trigger.trunk.authTimeoutSeconds) * 1000));
     return timeoutMs > 0 ? timeoutMs : null;
   }

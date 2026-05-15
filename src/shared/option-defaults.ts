@@ -47,9 +47,11 @@ export const OPTION_DEFAULTS = {
   },
   trigger: {
     trunk: {
-      registerMode: "register",
+      connectionMode: "fixed",
+      useRegistration: true,
+      authMode: "static",
       ...TRIGGER_AUTH_RESPONSE_TIMEOUT_DEFAULT,
-      continueTraversalOnAuthReject: true,
+      continueTraversalOnAuthReject: false,
       enableCallRecording: false,
       ...TRIGGER_RECORD_RESPONSE_TIMEOUT_DEFAULT,
     },

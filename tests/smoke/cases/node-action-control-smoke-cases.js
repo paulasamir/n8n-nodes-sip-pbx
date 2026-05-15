@@ -606,8 +606,7 @@ async function testActionOperationContract() {
     assert.ok(makeSipDialOptions.options.some((option) => option.name === "callerName"));
     assert.ok(makeSipDialOptions.options.some((option) => option.name === "customSipHeaders"));
     const freeEndpointsOption = makeSipDialOptions.options.find((option) => option.name === "extensionListOnlyFreeEndpoints");
-    assert.ok(freeEndpointsOption, "missing Only Free Endpoints option");
-    assert.strictEqual(freeEndpointsOption.default, true);
+    assert.strictEqual(freeEndpointsOption, undefined, "Only Free Endpoints must not exist for trunk/direct dial");
     assert.ok(!makeSipDialOptions.options.some((option) => option.name === "dialId"));
     assert.ok(breakDialOptions.options.some((option) => option.name === "dialId"));
     assert.ok(!breakDialOptions.options.some((option) => option.name === "callerNumber"));

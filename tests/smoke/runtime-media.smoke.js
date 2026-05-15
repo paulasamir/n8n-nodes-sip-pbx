@@ -2029,7 +2029,7 @@ async function main() {
 	    const trunkProviderAddress = trunkProvider.address();
 	    const registeringTrunkStream = await runtime.openTrunkTrigger({
 	      ref: "carrier-outbound",
-	      trunkRegisterMode: "register",
+	      trunkConnectionMode: "register",
 	      registrationExpires: 2,
 	      sipCredentials: {
 	        sipServer: "127.0.0.1",
@@ -2163,7 +2163,7 @@ async function main() {
 	    const realTrunkEvents = [];
 	    const realTrunkStream = await runtime.openTrunkTrigger({
       ref: "carrier-sip",
-      trunkRegisterMode: "register",
+      trunkConnectionMode: "register",
       registrationExpires: 60,
       sipCredentials: {
         sipServer: "127.0.0.1",

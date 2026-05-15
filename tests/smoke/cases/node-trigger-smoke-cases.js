@@ -100,7 +100,8 @@ async function testTrunkTriggerNode() {
     Object.assign(node, createTriggerContext({
       triggerOn: "trunk",
       ref: "carrier-a",
-      trunkRegisterMode: "register",
+      trunkConnectionMode: "fixed",
+      trunkUseRegistration: true,
       enableCallRecording: true,
       trunkOptions: {
         registrationExpires: 900,
@@ -128,7 +129,8 @@ async function testTrunkTriggerNode() {
   assert.strictEqual(seen.config.ref, "carrier-a");
   assert.strictEqual(seen.config.sipCredentials.username, "carrier-user");
   assert.deepStrictEqual(seen.config.registerHeaders, [{ name: "X-Test", value: "1" }]);
-  assert.strictEqual(seen.config.trunkRegisterMode, "register");
+  assert.strictEqual(seen.config.trunkConnectionMode, "fixed");
+  assert.strictEqual(seen.config.trunkUseRegistration, true);
   assert.strictEqual(seen.config.enableCallRecording, true);
   assert.strictEqual(seen.config.recordResponseTimeoutSeconds, 2.5);
   assert.strictEqual(seen.config.recordingFilePathTemplate, undefined);
@@ -206,7 +208,8 @@ async function testTrunkAuthTriggerNode() {
     Object.assign(node, createTriggerContext({
       triggerOn: "trunk",
       ref: "carrier-auth",
-      trunkRegisterMode: "auth",
+      trunkConnectionMode: "dynamic",
+      authMode: "raw",
       trunkOptions: {
         authTimeoutSeconds: 7.5,
         continueTraversalOnAuthReject: true,
@@ -227,7 +230,8 @@ async function testTrunkAuthTriggerNode() {
   });
 
   assert.strictEqual(seen.config.ref, "carrier-auth");
-  assert.strictEqual(seen.config.trunkRegisterMode, "auth");
+  assert.strictEqual(seen.config.trunkConnectionMode, "dynamic");
+  assert.strictEqual(seen.config.authMode, "raw");
   assert.strictEqual(seen.config.authTimeoutSeconds, 7.5);
   assert.strictEqual(seen.config.continueTraversalOnAuthReject, true);
   assert.strictEqual(seen.config.realm, "carrier.local");
@@ -240,6 +244,90 @@ async function testTrunkAuthTriggerNode() {
   assert.strictEqual(emitted[0][1][0].json.auth.realm, "carrier.local");
   assert.deepStrictEqual(emitted[0][1][0]._sipPbxResponseHandle, { kind: "auth", handle: "auth-trunk-1" });
   return { emitted: emitted.length };
+}
+
+async function testTrunkAuthTriggerNodeDefaultsBindPort() {
+  const seen = {};
+  const stream = createFakeStream();
+  const fakeRuntime = {
+    async openTrunkTrigger(config, onEvent) {
+      seen.config = config;
+      stream.onEvent(onEvent);
+      return stream;
+    },
+    async closeTriggerStream(kind, input) {
+      assert.strictEqual(kind, "trunk");
+      assert.deepStrictEqual(input, { ref: "carrier-auth-no-port" });
+      stream.close();
+    },
+  };
+
+  await withPatchedRuntime(fakeRuntime, sipPbxTriggerModulePath, async ({ SipPbxTrigger }) => {
+    const node = new SipPbxTrigger();
+    Object.assign(node, createTriggerContext({
+      triggerOn: "trunk",
+      ref: "carrier-auth-no-port",
+      trunkConnectionMode: "dynamic",
+      authMode: "raw",
+      trunkOptions: {
+        realm: "carrier.local",
+      },
+    }, {
+      workflowId: "wf-trunk-auth-no-port",
+      nodeName: "Trunk Auth Trigger No Port",
+      nodePosition: [160, 300],
+    }));
+    const activation = await node.trigger();
+    await activation.closeFunction();
+  });
+
+  assert.strictEqual(seen.config.trunkConnectionMode, "dynamic");
+  assert.strictEqual(seen.config.localBindPort, 5060);
+  return { ok: true };
+}
+
+async function testTrunkStaticAuthTriggerNode() {
+  const seen = {};
+  const stream = createFakeStream();
+  const fakeRuntime = {
+    async openTrunkTrigger(config, onEvent) {
+      seen.config = config;
+      stream.onEvent(onEvent);
+      return stream;
+    },
+    async closeTriggerStream(kind, input) {
+      assert.strictEqual(kind, "trunk");
+      assert.deepStrictEqual(input, { ref: "carrier-static-auth" });
+      stream.close();
+    },
+  };
+
+  await withPatchedRuntime(fakeRuntime, sipPbxTriggerModulePath, async ({ SipPbxTrigger }) => {
+    const node = new SipPbxTrigger();
+    Object.assign(node, createTriggerContext({
+      triggerOn: "trunk",
+      ref: "carrier-static-auth",
+      trunkConnectionMode: "dynamic",
+      authMode: "static",
+      trunkStaticUsername: "n8n-trunk",
+      trunkStaticPassword: "Passw0rd",
+      trunkOptions: {
+        realm: "carrier.local",
+      },
+    }, {
+      workflowId: "wf-trunk-static-auth",
+      nodeName: "Trunk Static Auth Trigger",
+      nodePosition: [170, 310],
+    }));
+    const activation = await node.trigger();
+    await activation.closeFunction();
+  });
+
+  assert.strictEqual(seen.config.trunkConnectionMode, "dynamic");
+  assert.strictEqual(seen.config.authMode, "static");
+  assert.deepStrictEqual(seen.config.staticCredentials, [{ username: "n8n-trunk", password: "Passw0rd", extension: "" }]);
+  assert.strictEqual("authTimeoutSeconds" in seen.config, false);
+  return { ok: true };
 }
 
 async function testExtensionsTriggerNode() {
@@ -631,6 +719,13 @@ async function testTriggerPropertyContract() {
     assert.strictEqual(credentialValues[1].required, true);
     assert.strictEqual(credentialValues[2].required, true);
 
+    const trunkStaticUsernameProperty = properties.find((property) => property.name === "trunkStaticUsername");
+    const trunkStaticPasswordProperty = properties.find((property) => property.name === "trunkStaticPassword");
+    assert.ok(trunkStaticUsernameProperty, "missing trunkStaticUsername property");
+    assert.ok(trunkStaticPasswordProperty, "missing trunkStaticPassword property");
+    assert.strictEqual(trunkStaticUsernameProperty.required, true);
+    assert.strictEqual(trunkStaticPasswordProperty.required, true);
+
     const aiToolOptionsProperty = properties.find((property) => property.name === "aiToolOptions");
     assert.ok(aiToolOptionsProperty, "missing aiToolOptions property");
     assert.strictEqual(aiToolOptionsProperty.type, "collection");
@@ -662,6 +757,20 @@ async function testTriggerPropertyContract() {
       .flatMap((property) => property.options)
       .find((option) => option.name === "registerHeaders");
     assert.strictEqual(trunkHeadersOption.options[0].values[0].required, true);
+    const dynamicAuthTimeoutProperty = trunkOptionsProperties.find((property) =>
+      property.displayOptions?.show?.trunkConnectionMode?.[0] === "dynamic"
+      && property.options.some((option) => option.name === "authTimeoutSeconds"),
+    );
+    assert.ok(dynamicAuthTimeoutProperty, "missing dynamic trunkOptions variant");
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(dynamicAuthTimeoutProperty.displayOptions.show, "trunkUseRegistration"),
+      false,
+      "dynamic trunkOptions must not depend on trunkUseRegistration",
+    );
+    assert.ok(
+      !trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "authorizationUsernamePrefix")),
+      "dynamic trunkOptions must not expose authorizationUsernamePrefix",
+    );
 
     const extensionsOptionsProperties = properties.filter((property) => property.name === "extensionsOptions");
     assert.ok(extensionsOptionsProperties.length >= 1, "missing extensionsOptions property");
@@ -715,6 +824,8 @@ async function runTriggerNodeSmokeCases() {
     triggerActivationRollback: await testTriggerActivationRollback(),
     trunkTrigger: await testTrunkTriggerNode(),
     trunkAuthTrigger: await testTrunkAuthTriggerNode(),
+    trunkAuthNoPort: await testTrunkAuthTriggerNodeDefaultsBindPort(),
+    trunkStaticAuthTrigger: await testTrunkStaticAuthTriggerNode(),
     extensionsTrigger: await testExtensionsTriggerNode(),
     queueTrigger: await testQueueTriggerNode(),
   };

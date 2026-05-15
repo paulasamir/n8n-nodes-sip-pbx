@@ -572,7 +572,15 @@ export function buildActionNodeProperties(): UiProperty[] {
       ],
     },
     { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["verify_password"] } } },
-    { displayName: "Extension", name: "extension", type: "string", default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["verify_password", "allow"] } } },
+    {
+      displayName: "Extension",
+      name: "extension",
+      type: "string",
+      default: "",
+      required: false,
+      description: "Used for extension auth only. Leave empty for trunk dynamic address auth, or when the extension can be derived from the auth username.",
+      displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["verify_password", "allow"] } },
+    },
     { displayName: "Status Code", name: "statusCode", type: "number", default: OPTION_DEFAULTS.extensionsAction.statusCode, required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["challenge", "deny"] } } },
     { displayName: "Reason", name: "reason", type: "string", default: "", required: true, displayOptions: { show: { resource: ["respond"], operation: ["respond.toAuth"], authAction: ["deny"] } } },
     {

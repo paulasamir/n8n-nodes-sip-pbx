@@ -1381,6 +1381,107 @@ test("extension outbound target reuses the extensions listener socket", async ()
   assert.strictEqual(resolved.localBindPort, 5060);
 });
 
+test("dynamic-address trunk resolves outbound target from active registration binding", async () => {
+  const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
+
+  const fakeSocket = {
+    send(_buffer, _port, _host, callback) {
+      callback(null);
+    },
+    close() {},
+  };
+
+  const service = new SipTransportService({
+    legService: {
+      requireLeg() {
+        return { signalingDetails: {} };
+      },
+      updateSignalingDetails() {
+        return { signalingDetails: {} };
+      },
+      hangupLeg() {},
+    },
+    extensionService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    trunkService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    authService: {
+      async waitForResolution() {
+        throw new Error("unused");
+      },
+    },
+    onAttemptRinging() {},
+    onAttemptProgress() {},
+    onAttemptAnswered() {},
+    onAttemptRejected() {},
+  });
+
+  service.trunkHosts.set("carrier-dynamic", {
+    ref: "carrier-dynamic",
+    publicRef: "carrier-dynamic",
+    routeToken: "route-dynamic-1",
+    socket: fakeSocket,
+    bindIp: "127.0.0.1",
+    bindPort: 5060,
+    advertisedIp: "pbx.example.test",
+    realm: "carrier.test",
+    credentials: {},
+    connectionMode: "dynamic",
+    useRegistration: false,
+    authTimeoutMs: 5000,
+    continueTraversalOnAuthReject: false,
+    registrationExpires: 600,
+    registerHeaders: [],
+    registrationTimer: null,
+    dynamicRegistration: {
+      contactUri: "sip:carrier-user@203.0.113.20:5070",
+      sourceIp: "203.0.113.20",
+      sourcePort: 5070,
+      expiresAt: Date.now() + 60000,
+    },
+    registration: null,
+  });
+
+  const resolved = await service.resolveOutboundTarget(
+    {
+      dialId: "dial-dynamic-1",
+      mode: "trunk",
+      strategy: "parallel",
+      targets: [{ kind: "opaque", value: "200" }],
+      metadata: { ref: "carrier-dynamic", callerNumber: "100", customSipHeaders: [] },
+      attemptLegIds: [],
+      activeAttemptLegIds: [],
+      pendingTargets: [],
+      totalAttemptCount: 0,
+      finalized: false,
+      winnerLegId: null,
+      status: "dialing",
+      reason: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      endedAt: null,
+      sequentialAttemptTimeoutSeconds: 0,
+      sequentialGapSeconds: 0,
+    },
+    { kind: "opaque", value: "200" },
+  );
+
+  assert.ok(resolved);
+  assert.strictEqual(resolved.socket, fakeSocket);
+  assert.strictEqual(resolved.ownsSocket, false);
+  assert.strictEqual(resolved.remoteAddress, "203.0.113.20");
+  assert.strictEqual(resolved.remotePort, 5070);
+  assert.strictEqual(resolved.requestUri, "sip:200@203.0.113.20:5070");
+  assert.strictEqual(resolved.localBindIp, "127.0.0.1");
+  assert.strictEqual(resolved.localBindPort, 5060);
+});
+
 test("extensions listener routes SIP responses to active outbound extension sessions on the shared socket", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
   const { formatSipResponse } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
@@ -2056,9 +2157,12 @@ test("inbound trunk answer uses advertised host for Contact and SDP instead of w
     advertisedIp: "pbx.example.test",
     realm: "pbx.example.test",
     credentials: {
+      sipServer: "85.142.148.80",
+      port: 5060,
       publicDomain: "pbx.example.test",
     },
-    registerMode: true,
+    connectionMode: "fixed",
+    useRegistration: true,
     authTimeoutMs: 5000,
     registrationExpires: 600,
     registerHeaders: [],
@@ -2108,7 +2212,7 @@ test("inbound trunk answer uses advertised host for Contact and SDP instead of w
   assert.doesNotMatch(lastSentPayload, /IN IP4 0\.0\.0\.0/);
 });
 
-test("trunk without register mode reuses the same UDP listener as extensions on the same endpoint", async () => {
+test("dynamic-address trunk reuses the same UDP listener as extensions on the same endpoint", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
 
   const fakeSocket = {
@@ -2168,7 +2272,7 @@ test("trunk without register mode reuses the same UDP listener as extensions on 
 
     await service.activateTrunkTrigger({
       ref: "carrier-trunk",
-      trunkRegisterMode: "auth",
+      trunkConnectionMode: "dynamic",
       realm: "office.test",
       sipCredentials: {
         transport: "udp",
@@ -2189,7 +2293,74 @@ test("trunk without register mode reuses the same UDP listener as extensions on 
   }
 });
 
-test("register-mode trunk may share an extensions listener even with a different realm", async () => {
+test("dynamic-address trunk uses the default SIP port when no local bind port is configured", async () => {
+  const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
+
+  const fakeSocket = {
+    on() {},
+    send(_buffer, _port, _host, callback) {
+      callback(null);
+    },
+    close() {},
+  };
+  const observedBindPorts = [];
+  const service = new SipTransportService({
+    legService: {
+      requireLeg() {
+        return { signalingDetails: {} };
+      },
+      updateSignalingDetails() {
+        return { signalingDetails: {} };
+      },
+      hangupLeg() {},
+    },
+    extensionService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    trunkService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    authService: {
+      async waitForResolution() {
+        return { action: "not_applicable" };
+      },
+    },
+    onAttemptRinging() {},
+    onAttemptProgress() {},
+    onAttemptAnswered() {},
+    onAttemptRejected() {},
+  });
+  service.getOrCreateUdpListener = async (bindIp, bindPort) => {
+    observedBindPorts.push(bindPort);
+    return {
+      socket: fakeSocket,
+      bindIp,
+      bindPort,
+    };
+  };
+  service.closeUdpListener = () => {};
+
+  try {
+    await service.activateTrunkTrigger({
+      ref: "carrier-trunk",
+      trunkConnectionMode: "dynamic",
+      transport: "udp",
+      localBindIp: "127.0.0.1",
+      realm: "carrier.test",
+    });
+
+    assert.deepStrictEqual(observedBindPorts, [5060]);
+    assert.strictEqual(service.trunkHosts.get("carrier-trunk").bindPort, 5060);
+  } finally {
+    await service.deactivateTrunkTrigger("carrier-trunk");
+  }
+});
+
+test("fixed-address trunk with registration may share an extensions listener even with a different realm", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
 
   const fakeSocket = {
@@ -2247,7 +2418,8 @@ test("register-mode trunk may share an extensions listener even with a different
 
     await service.activateTrunkTrigger({
       ref: "carrier-trunk",
-      trunkRegisterMode: "register",
+      trunkConnectionMode: "fixed",
+      trunkUseRegistration: true,
       sipCredentials: {
         transport: "udp",
         localBindIp: "127.0.0.1",
@@ -2269,7 +2441,7 @@ test("register-mode trunk may share an extensions listener even with a different
   }
 });
 
-test("trunk without register mode rejects sharing a listener with a different extensions realm", async () => {
+test("dynamic-address trunk rejects sharing a listener with a different extensions realm", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
 
   const fakeSocket = {
@@ -2325,15 +2497,11 @@ test("trunk without register mode rejects sharing a listener with a different ex
     await assert.rejects(
       service.activateTrunkTrigger({
         ref: "carrier-trunk",
-        trunkRegisterMode: "auth",
+        trunkConnectionMode: "dynamic",
         realm: "carrier.test",
-        sipCredentials: {
-          transport: "udp",
-          localBindIp: "127.0.0.1",
-          localBindPort: 5060,
-          username: "carrier-user",
-          password: "carrier-secret",
-        },
+        transport: "udp",
+        localBindIp: "127.0.0.1",
+        localBindPort: 5060,
       }),
       /same realm/,
     );
@@ -2343,7 +2511,119 @@ test("trunk without register mode rejects sharing a listener with a different ex
   }
 });
 
-test("endpoint REGISTER handling gives trunk without register mode first priority on a shared listener", async () => {
+test("fixed-address trunk unregister during trigger deactivate answers digest challenge with an authorized REGISTER", async () => {
+  const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
+  const { formatSipResponse, parseSipMessage, getSipHeader } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
+
+  const sentMessages = [];
+  const fakeSocket = {
+    on() {},
+    send(buffer, _port, _host, callback) {
+      sentMessages.push(Buffer.from(buffer).toString("utf8"));
+      callback(null);
+    },
+    close() {},
+  };
+  const service = new SipTransportService({
+    legService: {
+      requireLeg() {
+        return { signalingDetails: {} };
+      },
+      updateSignalingDetails() {
+        return { signalingDetails: {} };
+      },
+      hangupLeg() {},
+    },
+    extensionService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    trunkService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    authService: {
+      async waitForResolution() {
+        return { action: "not_applicable" };
+      },
+    },
+    onAttemptRinging() {},
+    onAttemptProgress() {},
+    onAttemptAnswered() {},
+    onAttemptRejected() {},
+  });
+  service.getOrCreateUdpListener = async (bindIp, bindPort) => ({
+    socket: fakeSocket,
+    bindIp,
+    bindPort: bindPort || 5060,
+  });
+  service.closeUdpListener = () => {};
+
+  await service.activateTrunkTrigger({
+    ref: "carrier-trunk",
+    trunkConnectionMode: "fixed",
+    trunkUseRegistration: true,
+    sipCredentials: {
+      transport: "udp",
+      localBindIp: "127.0.0.1",
+      localBindPort: 5060,
+      publicDomain: "pbx.example.test",
+      sipServer: "carrier.test",
+      port: 5070,
+      username: "carrier-user",
+      password: "carrier-secret",
+    },
+  });
+
+  sentMessages.length = 0;
+  await service.deactivateTrunkTrigger("carrier-trunk");
+  assert.ok(sentMessages.length >= 1);
+  const unregisterRequest = parseSipMessage(sentMessages[0]);
+  assert.ok(unregisterRequest);
+  assert.equal(unregisterRequest.method, "REGISTER");
+  assert.match(String(getSipHeader(unregisterRequest, "contact") || ""), /expires=0/);
+
+  const challengeResponse = formatSipResponse({
+    statusCode: 401,
+    reasonPhrase: "Unauthorized",
+    headers: {
+      Via: getSipHeader(unregisterRequest, "via"),
+      From: getSipHeader(unregisterRequest, "from"),
+      To: `${getSipHeader(unregisterRequest, "to")};tag=remote-tag`,
+      "Call-ID": getSipHeader(unregisterRequest, "call-id"),
+      CSeq: getSipHeader(unregisterRequest, "cseq"),
+      "WWW-Authenticate": 'Digest realm="carrier.test", nonce="nonce-unregister-1", algorithm=MD5, qop="auth"',
+    },
+    body: "",
+  });
+
+  await service.handleEndpointDatagram(
+    {
+      ref: "carrier-trunk",
+      socket: fakeSocket,
+      bindIp: "127.0.0.1",
+      bindPort: 5060,
+      advertisedIp: "pbx.example.test",
+      realm: "carrier.test",
+      authMode: "raw",
+      authorizationUsernamePrefix: "",
+      staticCredentials: [],
+    },
+    Buffer.from(challengeResponse, "utf8"),
+    { address: "192.0.2.10", family: "udp4", port: 5070, size: Buffer.byteLength(challengeResponse) },
+  );
+
+  assert.ok(sentMessages.length >= 2);
+  const authorizedUnregisterRequest = parseSipMessage(sentMessages[sentMessages.length - 1]);
+  assert.ok(authorizedUnregisterRequest);
+  assert.equal(authorizedUnregisterRequest.method, "REGISTER");
+  assert.match(String(getSipHeader(authorizedUnregisterRequest, "contact") || ""), /expires=0/);
+  assert.match(String(getSipHeader(authorizedUnregisterRequest, "authorization") || ""), /Digest username="carrier-user"/);
+});
+
+test("endpoint REGISTER handling gives fixed-address trunk without registration first priority on a shared listener", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
   const { formatSipRequest } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
 
@@ -2422,10 +2702,13 @@ test("endpoint REGISTER handling gives trunk without register mode first priorit
     advertisedIp: "pbx.example.test",
     realm: "carrier.test",
     credentials: {
+      sipServer: "127.0.0.1",
+      port: 5070,
       username: "carrier-user",
       password: "carrier-secret",
     },
-    registerMode: false,
+    connectionMode: "fixed",
+    useRegistration: false,
     authTimeoutMs: 5000,
     registrationExpires: 600,
     registerHeaders: [],
@@ -2458,11 +2741,10 @@ test("endpoint REGISTER handling gives trunk without register mode first priorit
   );
 
   assert.strictEqual(registeredExtensions, 0);
-  assert.match(lastSentPayload, /^SIP\/2\.0 401 Unauthorized/m);
-  assert.match(lastSentPayload, /^WWW-Authenticate: Digest realm="carrier\.test"/m);
+  assert.match(lastSentPayload, /^SIP\/2\.0 200 OK/m);
 });
 
-test("trunk auth traversal can continue after reject when Continue On Auth Reject is enabled", async () => {
+test("dynamic-address trunk auth traversal can continue after reject when Continue On Auth Reject is enabled", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
   const { formatSipRequest } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
 
@@ -2542,7 +2824,8 @@ test("trunk auth traversal can continue after reject when Continue On Auth Rejec
     advertisedIp: "pbx.example.test",
     realm: "carrier.test",
     credentials: {},
-    registerMode: false,
+    connectionMode: "dynamic",
+    useRegistration: false,
     authTimeoutMs: 5000,
     continueTraversalOnAuthReject: true,
     registrationExpires: 600,
@@ -2560,7 +2843,8 @@ test("trunk auth traversal can continue after reject when Continue On Auth Rejec
     advertisedIp: "pbx.example.test",
     realm: "carrier.test",
     credentials: {},
-    registerMode: false,
+    connectionMode: "dynamic",
+    useRegistration: false,
     authTimeoutMs: 5000,
     continueTraversalOnAuthReject: false,
     registrationExpires: 600,
@@ -2594,7 +2878,327 @@ test("trunk auth traversal can continue after reject when Continue On Auth Rejec
   assert.match(lastSentPayload, /^SIP\/2\.0 200 OK/m);
 });
 
-test("trunk inbound INVITE routing prefers register route token, then no-register trunk", async () => {
+test("dynamic-address trunk REGISTER falls back to 501 when auth returns not_applicable and no later handler exists", async () => {
+  const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
+  const { formatSipRequest } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
+
+  let lastSentPayload = "";
+  const fakeSocket = {
+    send(buffer, _port, _host, callback) {
+      lastSentPayload = Buffer.from(buffer).toString("utf8");
+      callback(null);
+    },
+    close() {},
+  };
+
+  const service = new SipTransportService({
+    legService: {
+      requireLeg() {
+        return { signalingDetails: {} };
+      },
+      updateSignalingDetails() {
+        return { signalingDetails: {} };
+      },
+      hangupLeg() {},
+    },
+    extensionService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+      registerEndpoint() {
+        throw new Error("unused");
+      },
+      unregisterEndpoint() {},
+    },
+    trunkService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    authService: {
+      async waitForResolution() {
+        return { action: "not_applicable" };
+      },
+    },
+    trunkAuthBridge: {
+      createRequest() {
+        return { authRequestId: "auth-trunk-register-na-1" };
+      },
+    },
+    onAttemptRinging() {},
+    onAttemptProgress() {},
+    onAttemptAnswered() {},
+    onAttemptRejected() {},
+  });
+
+  service.trunkHosts.set("carrier-dynamic", {
+    ref: "carrier-dynamic",
+    publicRef: "carrier-dynamic",
+    routeToken: "route-dynamic-na-1",
+    socket: fakeSocket,
+    bindIp: "127.0.0.1",
+    bindPort: 5060,
+    advertisedIp: "pbx.example.test",
+    realm: "carrier.test",
+    credentials: {},
+    connectionMode: "dynamic",
+    useRegistration: false,
+    authTimeoutMs: 5000,
+    continueTraversalOnAuthReject: false,
+    registrationExpires: 600,
+    registerHeaders: [],
+    registrationTimer: null,
+    dynamicRegistration: null,
+    registration: null,
+  });
+
+  const registerRequest = formatSipRequest({
+    method: "REGISTER",
+    requestUri: "sip:carrier-user@carrier.test",
+    headers: {
+      Via: "SIP/2.0/UDP 203.0.113.20:5070;branch=z9hG4bK-dynamic-register-na-1",
+      From: "<sip:carrier-user@carrier.test>;tag=dynamic-register-na-1",
+      To: "<sip:carrier-user@carrier.test>",
+      "Call-ID": "dynamic-register-na-call-1",
+      CSeq: "1 REGISTER",
+      Contact: "<sip:carrier-user@203.0.113.20:5070>",
+      Expires: "600",
+      "Content-Length": "0",
+    },
+    body: "",
+  });
+
+  await service.handleEndpointDatagram(
+    { socket: fakeSocket, bindIp: "127.0.0.1", bindPort: 5060 },
+    Buffer.from(registerRequest, "utf8"),
+    { address: "203.0.113.20", family: "udp4", port: 5070, size: Buffer.byteLength(registerRequest) },
+  );
+
+  assert.match(lastSentPayload, /^SIP\/2\.0 501 Not Implemented/m);
+});
+
+test("dynamic-address trunk REGISTER falls through to extensions when auth returns not_applicable and extensions share the endpoint", async () => {
+  const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
+  const { formatSipRequest } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
+
+  let lastSentPayload = "";
+  const fakeSocket = {
+    send(buffer, _port, _host, callback) {
+      lastSentPayload = Buffer.from(buffer).toString("utf8");
+      callback(null);
+    },
+    close() {},
+  };
+
+  const service = new SipTransportService({
+    legService: {
+      requireLeg() {
+        return { signalingDetails: {} };
+      },
+      updateSignalingDetails() {
+        return { signalingDetails: {} };
+      },
+      hangupLeg() {},
+    },
+    extensionService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+      registerEndpoint() {
+        throw new Error("unused");
+      },
+      unregisterEndpoint() {},
+    },
+    trunkService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    authService: {
+      async waitForResolution() {
+        return { action: "not_applicable" };
+      },
+    },
+    trunkAuthBridge: {
+      createRequest() {
+        return { authRequestId: "auth-trunk-register-na-ext-1" };
+      },
+    },
+    onAttemptRinging() {},
+    onAttemptProgress() {},
+    onAttemptAnswered() {},
+    onAttemptRejected() {},
+  });
+
+  service.trunkHosts.set("carrier-dynamic", {
+    ref: "carrier-dynamic",
+    publicRef: "carrier-dynamic",
+    routeToken: "route-dynamic-na-ext-1",
+    socket: fakeSocket,
+    bindIp: "127.0.0.1",
+    bindPort: 5060,
+    advertisedIp: "pbx.example.test",
+    realm: "pbx.example.test",
+    credentials: {},
+    connectionMode: "dynamic",
+    useRegistration: false,
+    authTimeoutMs: 5000,
+    continueTraversalOnAuthReject: false,
+    registrationExpires: 600,
+    registerHeaders: [],
+    registrationTimer: null,
+    dynamicRegistration: null,
+    registration: null,
+  });
+
+  service.extensionsHosts.set("internal", {
+    ref: "internal",
+    publicRef: "internal",
+    socket: fakeSocket,
+    bindIp: "127.0.0.1",
+    bindPort: 5060,
+    advertisedIp: "pbx.example.test",
+    realm: "pbx.example.test",
+    authMode: "static",
+    authorizationUsernamePrefix: "",
+    continueTraversalOnAuthReject: false,
+    staticCredentials: [
+      { username: "user1", password: "Passw0rd", extension: "101" },
+    ],
+  });
+
+  const registerRequest = formatSipRequest({
+    method: "REGISTER",
+    requestUri: "sip:pub.sip.tg",
+    headers: {
+      Via: "SIP/2.0/UDP 203.0.113.20:5070;branch=z9hG4bK-dynamic-register-na-ext-1",
+      From: "\"user1\" <sip:user1@pub.sip.tg>;tag=dynamic-register-na-ext-1",
+      To: "\"user1\" <sip:user1@pub.sip.tg>",
+      "Call-ID": "dynamic-register-na-ext-call-1",
+      CSeq: "1 REGISTER",
+      Contact: "<sip:user1@203.0.113.20:5070>",
+      Expires: "600",
+      "Content-Length": "0",
+    },
+    body: "",
+  });
+
+  await service.handleEndpointDatagram(
+    { socket: fakeSocket, bindIp: "127.0.0.1", bindPort: 5060 },
+    Buffer.from(registerRequest, "utf8"),
+    { address: "203.0.113.20", family: "udp4", port: 5070, size: Buffer.byteLength(registerRequest) },
+  );
+
+  assert.match(lastSentPayload, /^SIP\/2\.0 401 Unauthorized/m);
+});
+
+test("dynamic-address trunk stores active registration binding after successful REGISTER auth", async () => {
+  const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
+  const { formatSipRequest } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
+
+  let lastSentPayload = "";
+  const fakeSocket = {
+    send(buffer, _port, _host, callback) {
+      lastSentPayload = Buffer.from(buffer).toString("utf8");
+      callback(null);
+    },
+    close() {},
+  };
+
+  const service = new SipTransportService({
+    legService: {
+      requireLeg() {
+        return { signalingDetails: {} };
+      },
+      updateSignalingDetails() {
+        return { signalingDetails: {} };
+      },
+      hangupLeg() {},
+    },
+    extensionService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+      registerEndpoint() {
+        throw new Error("unused");
+      },
+      unregisterEndpoint() {},
+    },
+    trunkService: {
+      emitInboundInvite() {
+        throw new Error("unused");
+      },
+    },
+    authService: {
+      async waitForResolution() {
+        return { action: "allow" };
+      },
+    },
+    trunkAuthBridge: {
+      createRequest() {
+        return { authRequestId: "auth-trunk-register-allow-1" };
+      },
+    },
+    onAttemptRinging() {},
+    onAttemptProgress() {},
+    onAttemptAnswered() {},
+    onAttemptRejected() {},
+  });
+
+  service.trunkHosts.set("carrier-dynamic", {
+    ref: "carrier-dynamic",
+    publicRef: "carrier-dynamic",
+    routeToken: "route-dynamic-1",
+    socket: fakeSocket,
+    bindIp: "127.0.0.1",
+    bindPort: 5060,
+    advertisedIp: "pbx.example.test",
+    realm: "carrier.test",
+    credentials: {},
+    connectionMode: "dynamic",
+    useRegistration: false,
+    authTimeoutMs: 5000,
+    continueTraversalOnAuthReject: false,
+    registrationExpires: 600,
+    registerHeaders: [],
+    registrationTimer: null,
+    dynamicRegistration: null,
+    registration: null,
+  });
+
+  const registerRequest = formatSipRequest({
+    method: "REGISTER",
+    requestUri: "sip:carrier-user@carrier.test",
+    headers: {
+      Via: "SIP/2.0/UDP 203.0.113.20:5070;branch=z9hG4bK-dynamic-register-allow-1",
+      From: "<sip:carrier-user@carrier.test>;tag=dynamic-register-allow-1",
+      To: "<sip:carrier-user@carrier.test>",
+      "Call-ID": "dynamic-register-allow-call-1",
+      CSeq: "1 REGISTER",
+      Contact: "<sip:carrier-user@203.0.113.20:5070>",
+      Expires: "600",
+      "Content-Length": "0",
+    },
+    body: "",
+  });
+
+  await service.handleEndpointDatagram(
+    { socket: fakeSocket, bindIp: "127.0.0.1", bindPort: 5060 },
+    Buffer.from(registerRequest, "utf8"),
+    { address: "203.0.113.20", family: "udp4", port: 5070, size: Buffer.byteLength(registerRequest) },
+  );
+
+  assert.match(lastSentPayload, /^SIP\/2\.0 200 OK/m);
+  assert.deepStrictEqual(service.trunkHosts.get("carrier-dynamic").dynamicRegistration, {
+    contactUri: "sip:carrier-user@203.0.113.20:5070",
+    sourceIp: "203.0.113.20",
+    sourcePort: 5070,
+    expiresAt: service.trunkHosts.get("carrier-dynamic").dynamicRegistration.expiresAt,
+  });
+  assert.ok(service.trunkHosts.get("carrier-dynamic").dynamicRegistration.expiresAt > Date.now());
+});
+
+test("trunk inbound INVITE routing prefers registered fixed-address route token, then fixed-address without registration", async () => {
   const { SipTransportService } = require("../../../../build-src/daemon/signaling/sip/sip-transport-service.js");
   const { formatSipRequest } = require("../../../../build-src/daemon/signaling/sip/sip-message.js");
 
@@ -2661,8 +3265,9 @@ test("trunk inbound INVITE routing prefers register route token, then no-registe
     bindPort: 5060,
     advertisedIp: "pbx.example.test",
     realm: "carrier.test",
-    credentials: {},
-    registerMode: true,
+    credentials: { sipServer: "127.0.0.1", port: 5070 },
+    connectionMode: "fixed",
+    useRegistration: true,
     authTimeoutMs: 5000,
     registrationExpires: 600,
     registerHeaders: [],
@@ -2678,8 +3283,9 @@ test("trunk inbound INVITE routing prefers register route token, then no-registe
     bindPort: 5060,
     advertisedIp: "pbx.example.test",
     realm: "carrier.test",
-    credentials: {},
-    registerMode: false,
+    credentials: { sipServer: "127.0.0.1", port: 5070 },
+    connectionMode: "fixed",
+    useRegistration: false,
     authTimeoutMs: 5000,
     registrationExpires: 600,
     registerHeaders: [],
@@ -2701,11 +3307,12 @@ test("trunk inbound INVITE routing prefers register route token, then no-registe
     },
     body: "",
   });
-  await service.handleOrderedTrunkInviteByEndpoint(
+  await service.handleFixedTrunkRequestByEndpoint(
     "127.0.0.1",
     5060,
     require("../../../../build-src/daemon/signaling/sip/sip-message.js").parseSipMessage(Buffer.from(routeInvite, "utf8")),
     { address: "127.0.0.1", family: "udp4", port: 5070, size: Buffer.byteLength(routeInvite) },
+    "invite",
   );
 
   const plainInvite = formatSipRequest({
@@ -2722,11 +3329,12 @@ test("trunk inbound INVITE routing prefers register route token, then no-registe
     },
     body: "",
   });
-  await service.handleOrderedTrunkInviteByEndpoint(
+  await service.handleFixedTrunkRequestByEndpoint(
     "127.0.0.1",
     5060,
     require("../../../../build-src/daemon/signaling/sip/sip-message.js").parseSipMessage(Buffer.from(plainInvite, "utf8")),
     { address: "127.0.0.1", family: "udp4", port: 5070, size: Buffer.byteLength(plainInvite) },
+    "invite",
   );
 
   assert.deepStrictEqual(emittedRefs, ["carrier-register", "carrier-none"]);

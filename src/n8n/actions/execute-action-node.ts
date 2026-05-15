@@ -523,15 +523,18 @@ async function executeDialItem(context: ItemExecutionContext): Promise<NodeEmiss
         return emit(0, buildOutputItem(item, payload, { dialId: result.dialId, legId: legId || undefined }));
       } catch (error) {
         const callMode = String(readNodeParameter(node, "callMode", index, "") || "").trim();
-        if (callMode !== "extension" || !isExtensionNoAvailableEndpointsError(error)) {
+        if (callMode === "extension" && isExtensionNoAvailableEndpointsError(error)) {
+          const payload = {
+            reason: "no_available_endpoints",
+            message: "No registered endpoints matched the requested extension list.",
+            extensionNumbers: normalizeStringList(String(readNodeParameter(node, "extensionNumbers", index, "") || "")),
+          };
+          return emit(1, buildOutputItem(item, payload));
+        }
+        if (callMode !== "extension") {
           throw error;
         }
-        const payload = {
-          reason: "no_available_endpoints",
-          message: "No registered endpoints matched the requested extension list.",
-          extensionNumbers: normalizeStringList(String(readNodeParameter(node, "extensionNumbers", index, "") || "")),
-        };
-        return emit(1, buildOutputItem(item, payload));
+        throw error;
       }
     }
     case "dial.break": {

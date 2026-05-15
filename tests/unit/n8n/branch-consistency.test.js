@@ -51,13 +51,16 @@ test("ai tool trigger declares exactly the registry-ordered branches", () => {
   assert.strictEqual(count, branches.AiToolTriggerBranches.length);
 });
 
-test("trunk trigger output count matches buildTrunkTriggerBranchOrder for register/record combinations", () => {
-  for (const trunkRegisterMode of ["register", "auth"]) {
+test("trunk trigger output count matches buildTrunkTriggerBranchOrder for fixed/dynamic auth combinations", () => {
+  for (const trunkConnectionMode of ["fixed", "dynamic"]) {
     for (const enableCallRecording of [false, true]) {
-      assert.strictEqual(
-        triggerOutputCount({ triggerOn: "trunk", trunkRegisterMode, enableCallRecording }),
-        branches.buildTrunkTriggerBranchOrder(enableCallRecording, trunkRegisterMode === "auth").length,
-      );
+      for (const authMode of ["static", "digest-first", "raw"]) {
+        const enableAuth = trunkConnectionMode === "dynamic" && authMode !== "static";
+        assert.strictEqual(
+          triggerOutputCount({ triggerOn: "trunk", trunkConnectionMode, enableCallRecording, authMode }),
+          branches.buildTrunkTriggerBranchOrder(enableCallRecording, enableAuth).length,
+        );
+      }
     }
   }
 });
@@ -70,7 +73,7 @@ test("recording and auth trigger branches use stable names", () => {
 
 test("extensions trigger output count matches buildExtensionsTriggerBranchOrder for all combinations", () => {
   for (const enableRecording of [false, true]) {
-    for (const authMode of ["static", "interactive"]) {
+    for (const authMode of ["static", "digest-first", "raw"]) {
       const enableAuth = authMode !== "static";
       const actual = triggerOutputCount({
         triggerOn: "extensions",

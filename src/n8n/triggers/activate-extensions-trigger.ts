@@ -9,8 +9,9 @@ import {
   requireBranchIndex,
   type ExtensionsTriggerBranch,
 } from "../../shared/branches";
-import { readCollectionOptions, readFixedCollectionItems, readStringParameter } from "../shared/input-normalization";
+import { readCollectionOptions, readStringParameter } from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem, normalizePublicRawObject } from "../shared/output-builders";
+import { readSharedAuthTriggerConfig } from "./shared-auth-trigger";
 
 import { extractSipDisplayName, extractSipUser } from "../shared/sip-address";
 
@@ -36,6 +37,14 @@ export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime):
   const authMode = readStringParameter(node, "authMode", 0, OPTION_DEFAULTS.trigger.extensions.authMode);
   const extensionsEnableCallRecording = Boolean(node.getNodeParameter?.("extensionsEnableCallRecording", 0, OPTION_DEFAULTS.trigger.extensions.enableCallRecording));
   const options = readCollectionOptions(node, "extensionsOptions", 0);
+  const authConfig = readSharedAuthTriggerConfig(node, 0, {
+    kind: "extensions",
+    optionsName: "extensionsOptions",
+    authModeName: "authMode",
+    staticCredentialsName: "staticCredentials",
+    authTimeoutDefault: OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds,
+    continueTraversalDefault: OPTION_DEFAULTS.trigger.extensions.continueTraversalOnAuthReject,
+  });
   const transports = readExtensionsTransportSet(options);
   if (transports.length === 0) {
     throw new Error("At least one extensions transport must be selected");
@@ -65,26 +74,15 @@ export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime):
     })(),
     advertisedIp: String(options.advertisedIp || "").trim(),
     realm: String(options.realm || "").trim(),
-    authorizationUsernamePrefix: String(options.authorizationUsernamePrefix || "").trim(),
-    continueTraversalOnAuthReject: options.continueTraversalOnAuthReject === true,
-    authMode,
+    authorizationUsernamePrefix: authConfig.authorizationUsernamePrefix,
+    continueTraversalOnAuthReject: authConfig.continueTraversalOnAuthReject,
+    authMode: authConfig.authMode,
     extensionsEnableCallRecording,
   };
-  if (authMode === "static") {
-    config.staticCredentials = readFixedCollectionItems(node, "staticCredentials", 0).map((entry) => ({
-      username: String(entry.username || "").trim(),
-      password: String(entry.password || "").trim(),
-      extension: String(entry.extension || "").trim(),
-    }));
+  if (authConfig.authMode === "static") {
+    config.staticCredentials = authConfig.staticCredentials || [];
   } else {
-    config.authTimeoutSeconds = (() => {
-      const raw = options.authTimeoutSeconds;
-      if (raw == null || raw === "") {
-        return OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds;
-      }
-      const numeric = Number(raw);
-      return Number.isFinite(numeric) ? numeric : OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds;
-    })();
+    config.authTimeoutSeconds = authConfig.authTimeoutSeconds;
   }
   if (extensionsEnableCallRecording) {
     config.recordResponseTimeoutSeconds = (() => {

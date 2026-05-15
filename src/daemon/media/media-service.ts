@@ -86,6 +86,20 @@ function buildDtmfInterruptTargets(operations: MediaOperation[]): string[] {
     .map((operation) => operation.mediaId);
 }
 
+function shouldConsumeInboundDtmfForBlockingMedia(operations: MediaOperation[]): boolean {
+  const blockingOperations = operations.filter((operation) => (
+    (operation instanceof PlayAudioOperation
+      || operation instanceof PlayTonesOperation
+      || operation instanceof RecordAudioOperation)
+    && !operation.finalized
+    && !operation.isBackground()
+  ));
+  if (blockingOperations.length === 0) {
+    return false;
+  }
+  return blockingOperations.every((operation) => !Boolean(operation.options.interruptOnDtmf));
+}
+
 type EndpointTransportType = WorkerRuntimeTransportType;
 
 type WorkerHandle = {
@@ -2196,7 +2210,10 @@ export class MediaService {
     if (!digits) {
       return;
     }
-    this.legService.publishDtmf(legId, digits);
+    const activeOperations = this.listMediaOperationsByLegId(legId).filter((operation) => !operation.finalized);
+    if (!shouldConsumeInboundDtmfForBlockingMedia(activeOperations)) {
+      this.legService.publishDtmf(legId, digits);
+    }
     await this.interruptOnDtmf(legId, digits);
     const bridgePeer = this.executionPlane.getBridgePeerInfo(legId);
     if (bridgePeer && String(bridgePeer.relayDtmf || OPTION_DEFAULTS.call.relayDtmf) !== "disabled") {
