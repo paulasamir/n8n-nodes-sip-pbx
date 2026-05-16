@@ -3,6 +3,7 @@ import type { RequestContext } from "../core/request-context";
 import { nowMs } from "../core/time";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { MapRegistry } from "../../shared/map-registry";
+import { TerminalSnapshotStore } from "../core/terminal-snapshot-store";
 import {
   CALL_EVENT_DTMF,
   CALL_EVENT_ENDED,
@@ -89,9 +90,14 @@ function timeoutOutput(legId: string, digits?: string): WaitOutput {
 
 export class LegWaitService {
   private readonly registry: MapRegistry<string, Leg>;
+  private readonly terminalSnapshots: TerminalSnapshotStore<{ legId: string; event: LegEvent }>;
 
-  constructor(registry: MapRegistry<string, Leg>) {
+  constructor(
+    registry: MapRegistry<string, Leg>,
+    terminalSnapshots?: TerminalSnapshotStore<{ legId: string; event: LegEvent }>,
+  ) {
     this.registry = registry;
+    this.terminalSnapshots = terminalSnapshots || new TerminalSnapshotStore<{ legId: string; event: LegEvent }>();
   }
 
   async waitForEvent(
@@ -105,15 +111,22 @@ export class LegWaitService {
       throw daemonError("invalid_leg_wait", "No leg IDs to wait");
     }
 
+    const snapshots = legIds.map((currentLegId) => ({
+      legId: currentLegId,
+      snapshot: this.terminalSnapshots.get(currentLegId),
+    }));
     const records = legIds.map((currentLegId) => ({
       legId: currentLegId,
       record: this.registry.get(currentLegId),
     }));
-    const missing = records.find((entry) => !entry.record)?.legId || "";
+    const missing = records.find((entry, index) => !entry.record && !snapshots[index]?.snapshot)?.legId || "";
     if (missing) {
       throw daemonError("invalid_leg_wait", `Leg ${missing} cannot be waited`);
     }
-    const waitRecords = records as Array<{ legId: string; record: Leg }>;
+    const waitRecords = records.filter((entry): entry is { legId: string; record: Leg } => Boolean(entry.record));
+    const waitSnapshotRecords = snapshots.filter(
+      (entry): entry is { legId: string; snapshot: { legId: string; event: LegEvent } } => Boolean(entry.snapshot),
+    );
     const waitTickets = waitRecords.map(({ record }) => record.retain("leg-wait"));
     try {
 
@@ -132,7 +145,7 @@ export class LegWaitService {
     const terminatorDigit = String(params.dtmfTerminatorDigit || "").trim();
 
     const stateByLegId = new Map<string, PerLegState>();
-    for (const { legId: currentLegId } of waitRecords) {
+    for (const currentLegId of legIds) {
       stateByLegId.set(currentLegId, { digits: "", lastDigitAt: 0 });
     }
 
@@ -143,6 +156,22 @@ export class LegWaitService {
       }
       const state = stateByLegId.get(currentLegId)!;
       const result = this.processEvent(currentLegId, immediate, rules, {
+        digits: state.digits,
+        enableDtmfFallback,
+        enableMultiDigitFallback,
+        terminatorDigit,
+        interdigitTimeoutMs,
+        allowFinalize: false,
+      });
+      state.digits = result.digits;
+      state.lastDigitAt = result.lastDigitAt || state.lastDigitAt;
+      if (result.output) {
+        return result.output;
+      }
+    }
+    for (const { legId: currentLegId, snapshot } of waitSnapshotRecords) {
+      const state = stateByLegId.get(currentLegId)!;
+      const result = this.processEvent(currentLegId, snapshot.event, rules, {
         digits: state.digits,
         enableDtmfFallback,
         enableMultiDigitFallback,

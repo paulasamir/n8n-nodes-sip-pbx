@@ -246,7 +246,8 @@ function isExtensionNoAvailableEndpointsError(error: unknown): boolean {
   }
   const code = String((error as { code?: unknown }).code || "").trim();
   const message = String((error as { message?: unknown }).message || "").trim();
-  return (code === "" || code === "invalid_dial_targets") && message === "Extension dial requires active registrations";
+  return (code === "" || code === "invalid_dial_targets" || code === "invalid_request")
+    && message === "Extension dial requires active registrations";
 }
 
 function createCallWaitPlan(node: any, index: number): CallWaitPlan {

@@ -50,6 +50,7 @@ export async function executePlayAudio(node: any, runtime: PbxRuntime, item: any
     interruptOnVoice,
     duckingFactor,
     mediaExecutionMode,
+    stopOtherMedia: Boolean(mediaOptions.stopOtherMedia),
   };
   if (sourceType === "binary") {
     input.binaryProperty = binaryProperty;
@@ -115,6 +116,7 @@ export async function executePlayTone(node: any, runtime: PbxRuntime, item: any,
     interruptOnVoice,
     duckingFactor,
     mediaExecutionMode,
+    stopOtherMedia: Boolean(mediaOptions.stopOtherMedia),
   };
   if (tone === "custom") {
     input.customTone = readStringParameter(node, "customTone", index, "");
@@ -147,6 +149,7 @@ export async function executeRecordAudio(node: any, runtime: PbxRuntime, item: a
     recordFileFormat,
     recordOutputType,
     mediaExecutionMode,
+    stopOtherMedia: Boolean(mediaOptions.stopOtherMedia),
   };
   if (interruptOnSilence) {
     input.silenceThreshold = Number.isFinite(Number(mediaOptions.silenceThreshold))

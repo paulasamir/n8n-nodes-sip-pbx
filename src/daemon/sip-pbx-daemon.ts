@@ -56,20 +56,21 @@ import { ControllerServer } from "./controller-server";
 import { daemonError } from "./core/daemon-error";
 import { RequestContext } from "./core/request-context";
 import { newAiToolRequestId, newRecordRequestId, newSocketId, newTriggerKey } from "./core/ids";
+import { TerminalSnapshotStore } from "./core/terminal-snapshot-store";
 import { MapRegistry } from "../shared/map-registry";
 import { DialService } from "./dials/dial-service";
-import type { Dial } from "./dials/types";
+import type { Dial, DialEvent } from "./dials/types";
 import { DialWaitService } from "./dials/dial-wait-service";
 import { InteractiveAuthRequestRegistry } from "./extensions-auth/interactive-auth-request-registry";
 import { InteractiveAuthService } from "./extensions-auth/interactive-auth-service";
 import { InteractiveAuthTriggerPublisher } from "./extensions-auth/interactive-auth-trigger-publisher";
 import { LegCoordinator } from "./legs/leg-coordinator";
 import { LegService } from "./legs/leg-service";
-import type { Leg } from "./legs/types";
+import type { Leg, LegEvent } from "./legs/types";
 import { LegWaitService } from "./legs/leg-wait-service";
 import type { WaitRule } from "./legs/leg-wait-service";
 import { MediaService } from "./media/media-service";
-import type { MediaOperation } from "./media/operations/media-operation";
+import type { MediaEvent, MediaOperation } from "./media/operations/media-operation";
 import { createWebSocketTransportProfile } from "./media/transports/websocket-transport";
 import type { WebSocketVoiceAgentEvent } from "./media/transports/websocket-profiles";
 import { QueueEntryRegistry } from "./queue/queue-entry-registry";
@@ -268,12 +269,15 @@ export class SipPbxDaemon {
   readonly controllerServer: ControllerServer;
 
   readonly legRegistry = new MapRegistry<string, Leg>();
-  readonly legService = new LegService(this.legRegistry);
-  readonly legWaitService = new LegWaitService(this.legRegistry);
+  readonly legTerminalSnapshots = new TerminalSnapshotStore<{ legId: string; event: LegEvent }>();
+  readonly legService = new LegService(this.legRegistry, undefined, this.legTerminalSnapshots);
+  readonly legWaitService = new LegWaitService(this.legRegistry, this.legTerminalSnapshots);
   readonly legCoordinator = new LegCoordinator();
   readonly dialRegistry = new MapRegistry<string, Dial>();
-  readonly dialService = new DialService(this.dialRegistry, this.legService, this.legCoordinator);
-  readonly dialWaitService = new DialWaitService(this.dialRegistry);
+  readonly dialTerminalSnapshots = new TerminalSnapshotStore<DialEvent & { dialId: string }>();
+  readonly dialService = new DialService(this.dialRegistry, this.legService, this.legCoordinator, this.dialTerminalSnapshots);
+  readonly dialWaitService = new DialWaitService(this.dialRegistry, this.dialTerminalSnapshots);
+  readonly mediaTerminalSnapshots = new TerminalSnapshotStore<MediaEvent>();
   readonly mediaService: MediaService;
   readonly extensionService: ExtensionHost;
   readonly trunkService: TrunkClient;
@@ -364,6 +368,7 @@ export class SipPbxDaemon {
         });
       },
       legCoordinator: this.legCoordinator,
+      terminalSnapshots: this.mediaTerminalSnapshots,
     });
     this.sipTransportService = new SipTransportService({
       legService: this.legService,
@@ -771,7 +776,7 @@ export class SipPbxDaemon {
       "call.wait": ["operation", "legId", "legIds", "timeoutSeconds", "interdigitTimeoutSeconds", "rules", "waitDtmfFallbackEnabled", "waitDtmfMultiDigitFallbackEnabled", "dtmfTerminatorDigit"],
       "dial.make": ["operation", "callMode", "ref", "publicRef", "destination", "extensionNumbers", "extensionListOnlyFreeEndpoints", "workflowScopeKey", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "transportProfile", "websocketStartMode", "openaiApiKey", "openaiRealtimeModel", "openaiRealtimeVoice", "openaiRealtimeInputTranscriptionModel", "openaiRealtimeInstructions", "openaiRealtimePromptId", "openaiRealtimePromptVersion", "openaiRealtimePromptVariablesJson", "geminiApiKey", "geminiLiveModel", "geminiLiveVoice", "geminiLiveApiVersion", "geminiLiveInstructions", "websocketUrl", "websocketHeadersJson", "websocketInitialMessagesJson", "websocketAudioInputEventType", "websocketAudioInputField", "websocketAudioInputSampleRate", "websocketAudioOutputEventTypes", "websocketAudioOutputField", "websocketAudioOutputSampleRate", "sipCredentials"],
       "dial.break": ["operation", "dialId", "dialBreakReason"],
-      "dial.wait": ["operation", "dialId", "dialIds", "dialTimeoutSeconds", "waitEventOutputs"],
+      "dial.wait": ["operation", "dialId", "dialIds", "legId", "dialTimeoutSeconds", "waitEventOutputs"],
       "media.playAudio": ["operation", "mediaLegId", "sourceType", "binaryProperty", "binaryDataBase64", "filePath", "playbackHttpUrl", "playbackHttpMethod", "playbackHttpHeaders", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
       "media.playTone": ["operation", "mediaLegId", "tone", "customTone", "repeatInfinite", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
       "media.recordAudio": ["operation", "mediaLegId", "interruptOnDtmf", "interruptOnSilence", "silenceThreshold", "silenceDurationMs", "maxDurationSeconds", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordOutputType", "recordBinaryProperty", "recordFilePath", "recordHttpUrl", "recordHttpMethod", "recordHttpHeaders", "mediaExecutionMode", "stopOtherMedia"],
@@ -915,7 +920,10 @@ export class SipPbxDaemon {
           action.timeoutSeconds == null || action.timeoutSeconds === ""
             ? OPTION_DEFAULTS.call.waitTimeoutSeconds
             : action.timeoutSeconds;
-        const retention = this.legService.retainLegs(legIds, "action:call.wait");
+        const liveLegIds = legIds.filter((legId) => Boolean(this.legService.getLeg(legId)));
+        const retention = liveLegIds.length > 0
+          ? this.legService.retainLegs(liveLegIds, "action:call.wait")
+          : null;
         try {
           return await this.legWaitService.waitForEvent(
             legIds.length > 1 ? legIds : (legIds[0] || ""),
@@ -930,7 +938,7 @@ export class SipPbxDaemon {
             context,
           );
         } finally {
-          retention.release();
+          retention?.release();
         }
       }
       case "dial.wait":
@@ -938,14 +946,22 @@ export class SipPbxDaemon {
         const dialIds = Array.isArray(action.dialIds)
           ? normalizeStringList(action.dialIds)
           : normalizeStringList(action.dialId);
-        const retentions = dialIds.map((dialId) => this.dialService.retainDial(dialId, "action:dial.wait"));
+        const dialRetentions = dialIds.flatMap((dialId) => {
+          if (!this.dialService.getDial(dialId)) {
+            return [];
+          }
+          return [this.dialService.retainDial(dialId, "action:dial.wait")];
+        });
+        const retainedLegId = String(action.legId || "").trim();
+        const legRetention = retainedLegId ? this.legService.retainLeg(retainedLegId, "action:dial.wait") : null;
         try {
           return await this.dialWaitService.waitForEvent(dialIds.length > 1 ? dialIds : (dialIds[0] || ""), {
             timeoutMs: Math.max(0, Math.round(Number(action.dialTimeoutSeconds || OPTION_DEFAULTS.dial.waitTimeoutSeconds) * 1000)),
             waitEventOutputs: Array.isArray(action.waitEventOutputs) ? action.waitEventOutputs as string[] : [],
           }, context);
         } finally {
-          for (const ticket of retentions) {
+          legRetention?.release();
+          for (const ticket of dialRetentions) {
             ticket.release();
           }
         }

@@ -526,6 +526,80 @@ test("MediaService.playAudio with stopOtherMedia interrupts active recording on 
   }
 });
 
+test("MediaService.waitMedia returns terminal snapshot when a media operation has already been finalized and removed", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+  const { TerminalSnapshotStore } = require("../../../../build-src/daemon/core/terminal-snapshot-store.js");
+
+  const legRegistry = new MapRegistry();
+  const legService = new LegService(legRegistry);
+  const registry = new MapRegistry();
+  const terminalSnapshots = new TerminalSnapshotStore();
+  const service = new MediaService(registry, legService, {
+    terminalSnapshots,
+  });
+  const leg = legService.createLeg({
+    legId: "leg-media-terminal-snapshot",
+    direction: "inbound",
+    transportType: "websocket",
+  });
+
+  service.executionPlane = {
+    registerPlayback: async (input) => ({
+      legId: input.legId,
+      playbackCount: 1,
+      recordingActive: false,
+      activePlaybackMediaIds: [input.mediaId],
+      activeRecordingMediaId: null,
+      playbackMix: [],
+    }),
+    unregisterPlayback: async () => null,
+    startRecording: async () => { throw new Error("unused"); },
+    stopRecording: async () => null,
+    activateGlobalRecording: async () => { throw new Error("unused"); },
+    deactivateGlobalRecording: async () => null,
+    finalizeRecording: async () => ({}),
+    pauseGlobalRecording: async () => undefined,
+    resumeGlobalRecording: async () => undefined,
+    getRecordingMediaId: () => null,
+    sendDtmf: async () => false,
+    ensureTransportEndpoint: async () => ({}),
+    activateBridge: async () => undefined,
+    deactivateBridge: async () => undefined,
+    beginBridgeTermination: () => null,
+    orphanBridgeAfterLegEnd: async () => undefined,
+    pruneLegIfIdle: async () => undefined,
+    waitUntilLegStable: async () => undefined,
+    removeLeg: async () => undefined,
+    getSnapshot: () => null,
+    getBridgePeerInfo: () => null,
+    getWorkerCount: () => 0,
+    shutdown: async () => undefined,
+  };
+
+  try {
+    const started = await service.playAudio(leg.legId, {
+      mediaExecutionMode: "background",
+      sourceType: "binary",
+      binaryDataBase64: Buffer.from("SNAPSHOT").toString("base64"),
+    });
+
+    await service.finalizeOperation(String(started.mediaId), "completed", {});
+
+    const result = await service.waitMedia({
+      waitMediaIds: [String(started.mediaId)],
+      waitMediaTimeoutMs: 250,
+    });
+
+    assert.strictEqual(result.mediaId, started.mediaId);
+    assert.strictEqual(result.status, "completed");
+    assert.strictEqual(result.eventType, "completed");
+  } finally {
+    cleanupLeg(legService, leg.legId);
+  }
+});
+
 for (const scenario of [
   {
     name: "playAudio",

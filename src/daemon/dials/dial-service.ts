@@ -3,6 +3,7 @@ import type { RetentionTicket } from "../core/operation-retainer";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { nowMs } from "../core/time";
 import { MapRegistry } from "../../shared/map-registry";
+import { TerminalSnapshotStore } from "../core/terminal-snapshot-store";
 import { LegCoordinator } from "../legs/leg-coordinator";
 import { LegService } from "../legs/leg-service";
 import {
@@ -21,14 +22,21 @@ export class DialService {
   private readonly registry: MapRegistry<string, Dial>;
   private readonly legService: LegService;
   private readonly legCoordinator: LegCoordinator;
+  private readonly terminalSnapshots: TerminalSnapshotStore<DialEvent & { dialId: string }>;
   private onAttemptStarted: (dial: Dial, legId: string, target: DialTarget) => void;
   private onAttemptAnswered: (dial: Dial, legId: string) => void;
   private onDialFinalized: (dial: Dial, status: Dial["status"], reason?: string) => void;
 
-  constructor(registry: MapRegistry<string, Dial>, legService: LegService, legCoordinator?: LegCoordinator) {
+  constructor(
+    registry: MapRegistry<string, Dial>,
+    legService: LegService,
+    legCoordinator?: LegCoordinator,
+    terminalSnapshots?: TerminalSnapshotStore<DialEvent & { dialId: string }>,
+  ) {
     this.registry = registry;
     this.legService = legService;
     this.legCoordinator = legCoordinator || new LegCoordinator();
+    this.terminalSnapshots = terminalSnapshots || new TerminalSnapshotStore<DialEvent & { dialId: string }>();
     this.onAttemptStarted = () => undefined;
     this.onAttemptAnswered = () => undefined;
     this.onDialFinalized = () => undefined;
@@ -276,6 +284,10 @@ export class DialService {
       `[sip-pbx:dial] finalize; dial=${dial.dialId}; status=${status}; reason=${String(reason || "") || "none"}; winnerLeg=${dial.winnerLegId || "none"}; activeAttempts=${dial.activeAttemptLegIds.length}`,
     );
     this.onDialFinalized(dial, status, reason);
+    this.terminalSnapshots.remember(dial.dialId, {
+      dialId: dial.dialId,
+      ...event,
+    });
     dial.publishEvent(event);
     dial.rejectEventWaiters(new Error("dial_finalized"));
     for (const legId of dial.activeAttemptLegIds.slice()) {

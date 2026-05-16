@@ -6,6 +6,7 @@ import { MapRegistry } from "../../shared/map-registry";
 import { daemonError, isDaemonError } from "../core/daemon-error";
 import type { RequestContext } from "../core/request-context";
 import { newMediaId } from "../core/ids";
+import { TerminalSnapshotStore } from "../core/terminal-snapshot-store";
 import { nowMs } from "../core/time";
 import type { RetentionTicket } from "../core/operation-retainer";
 import { LegCoordinator } from "../legs/leg-coordinator";
@@ -1242,6 +1243,7 @@ export class MediaService {
   private readonly registry: MapRegistry<string, MediaOperation>;
   private readonly legService: LegService;
   private readonly executionPlane: MediaExecutionPlane;
+  private readonly terminalSnapshots: TerminalSnapshotStore<MediaEvent>;
   private readonly sendSignalingDtmf: (legId: string, digits: string, method: string) => Promise<boolean>;
   private readonly sendSignalingProgress: (legId: string) => void;
   private readonly recordingsRoot: string;
@@ -1260,10 +1262,12 @@ export class MediaService {
       recordingsRoot?: string;
       onVoiceAgentEvent?: (legId: string, event: WebSocketVoiceAgentEvent) => void;
       legCoordinator?: LegCoordinator;
+      terminalSnapshots?: TerminalSnapshotStore<MediaEvent>;
     },
   ) {
     this.registry = registry;
     this.legService = legService;
+    this.terminalSnapshots = options?.terminalSnapshots || new TerminalSnapshotStore<MediaEvent>();
     this.sendSignalingDtmf = options?.sendSignalingDtmf || (async () => false);
     this.sendSignalingProgress = options?.sendSignalingProgress || (() => undefined);
     this.recordingsRoot = String(options?.recordingsRoot || process.cwd());
@@ -1622,11 +1626,27 @@ export class MediaService {
     if (waitOperation.mediaIds.length === 0) {
       throw daemonError("invalid_media_wait", "At least one mediaId is required");
     }
-    const operations = waitOperation.mediaIds.map((mediaId) => this.requireMediaOperation(mediaId));
+    const records = waitOperation.mediaIds.map((mediaId) => ({
+      mediaId,
+      operation: this.registry.get(mediaId) || null,
+      snapshot: this.terminalSnapshots.get(mediaId),
+    }));
+    const missing = records.find((entry) => !entry.operation && !entry.snapshot)?.mediaId || "";
+    if (missing) {
+      throw daemonError("invalid_media_wait", `Unknown media ${missing}`);
+    }
+    const operations = records
+      .filter((entry): entry is { mediaId: string; operation: MediaOperation; snapshot: MediaEvent | null } => Boolean(entry.operation))
+      .map((entry) => entry.operation);
     for (const operation of operations) {
       const queued = operation.shiftEvent();
       if (queued) {
         return this.mediaEventToResult(queued);
+      }
+    }
+    for (const { snapshot } of records) {
+      if (snapshot) {
+        return this.mediaEventToResult(snapshot);
       }
     }
     // Retain the legs for the duration of the wait — mirrors blocking-op semantics.
@@ -2010,6 +2030,7 @@ export class MediaService {
     operation.result = await materializeResult(operation);
     operation.finalized = true;
     const event = this.buildMediaEvent(operation);
+    this.terminalSnapshots.remember(operation.mediaId, event);
     this.publishMediaEvent(mediaId, event);
     return this.mediaEventToResult(event);
   }

@@ -94,9 +94,11 @@ export async function executeWaitDial(node: any, runtime: PbxRuntime, item: any,
   if (dialIds.length === 0) {
     throw new Error("dialId is required");
   }
+  const legId = readStringParameter(node, "legId", index, "").trim();
   return await runtime.waitForDialEvent(
     dialIds.length === 1 ? dialIds[0]! : dialIds,
     {
+      ...(legId ? { legId } : {}),
       dialTimeoutSeconds: readNumberParameter(node, "dialTimeoutSeconds", index, OPTION_DEFAULTS.dial.waitTimeoutSeconds),
       waitEventOutputs,
     },

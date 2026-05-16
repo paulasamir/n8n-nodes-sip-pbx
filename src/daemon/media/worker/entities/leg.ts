@@ -34,6 +34,7 @@ type PlaybackRenderMixState = {
 type PlaybackRenderSnapshot = {
   activePlaybackMediaIds: string[];
   playbackMix: PlaybackRenderMixState[];
+  bridgeEffectiveGain: number;
 };
 
 export type LegMediaSessionSnapshot = {
@@ -333,16 +334,7 @@ function normalizeDuckingFactor(value: unknown): number {
 }
 
 function buildPlaybackMix(ordered: PlaybackRegistration[]): PlaybackMixState[] {
-  const rawGains = ordered.map((playback, index) => {
-    let gain = playback.duckingFactor > 1 ? playback.duckingFactor : 1;
-    for (let higherIndex = 0; higherIndex < index; higherIndex += 1) {
-      const higherDuckingFactor = ordered[higherIndex].duckingFactor;
-      if (higherDuckingFactor <= 1) {
-        gain *= higherDuckingFactor;
-      }
-    }
-    return gain;
-  });
+  const rawGains = buildRawPlaybackGains(ordered);
   const mixScale = 1 / Math.max(1, ...rawGains);
   return ordered.map((playback, index) => ({
     mediaId: playback.mediaId,
@@ -354,7 +346,28 @@ function buildPlaybackMix(ordered: PlaybackRegistration[]): PlaybackMixState[] {
 }
 
 function buildPlaybackRenderMix(ordered: PlaybackRegistration[]): PlaybackRenderMixState[] {
-  const rawGains = ordered.map((playback, index) => {
+  const rawGains = buildRawPlaybackGains(ordered);
+  const mixScale = 1 / Math.max(1, ...rawGains);
+  return ordered.map((playback, index) => ({
+    mediaId: playback.mediaId,
+    effectiveGain: (rawGains[index] || 0) * mixScale,
+  }));
+}
+
+function buildBridgeRenderGain(ordered: PlaybackRegistration[]): number {
+  const rawGains = buildRawPlaybackGains(ordered);
+  let gain = 1;
+  for (const playback of ordered) {
+    if (playback.duckingFactor <= 1) {
+      gain *= playback.duckingFactor;
+    }
+  }
+  const mixScale = 1 / Math.max(1, ...rawGains);
+  return gain * mixScale;
+}
+
+function buildRawPlaybackGains(ordered: PlaybackRegistration[]): number[] {
+  return ordered.map((playback, index) => {
     let gain = playback.duckingFactor > 1 ? playback.duckingFactor : 1;
     for (let higherIndex = 0; higherIndex < index; higherIndex += 1) {
       const higherDuckingFactor = ordered[higherIndex].duckingFactor;
@@ -364,11 +377,6 @@ function buildPlaybackRenderMix(ordered: PlaybackRegistration[]): PlaybackRender
     }
     return gain;
   });
-  const mixScale = 1 / Math.max(1, ...rawGains);
-  return ordered.map((playback, index) => ({
-    mediaId: playback.mediaId,
-    effectiveGain: (rawGains[index] || 0) * mixScale,
-  }));
 }
 
 function emitLegEvent<TArgs extends unknown[]>(
@@ -1104,7 +1112,7 @@ export class Leg {
       let outboundFrame = this.mixer.mixFrame(snapshot, frameBytes, this.ensurePlaybackScratch(frameBytes));
       let outboundBytes = outboundFrame ? frameBytes : 0;
       const bridgeFrame = outboundFrame
-        ? this.mixPendingBridgePlaybackIntoPlaybackFrame(outboundFrame, frameBytes)
+        ? this.mixPendingBridgePlaybackIntoPlaybackFrame(outboundFrame, frameBytes, snapshot.bridgeEffectiveGain)
         : this.takePendingBridgePlaybackFrame(frameBytes);
       if (bridgeFrame && !outboundFrame) {
         outboundFrame = bridgeFrame.pcm;
@@ -1178,6 +1186,7 @@ export class Leg {
     this.playbackRenderSnapshot = {
       activePlaybackMediaIds: ordered.map((playback) => playback.mediaId),
       playbackMix: buildPlaybackRenderMix(ordered),
+      bridgeEffectiveGain: buildBridgeRenderGain(ordered),
     };
     this.playbackRenderSnapshotDirty = false;
     return this.playbackRenderSnapshot;
@@ -1287,7 +1296,7 @@ export class Leg {
     };
   }
 
-  private mixPendingBridgePlaybackIntoPlaybackFrame(target: Buffer, frameBytes: number): BridgeRenderFrame | null {
+  private mixPendingBridgePlaybackIntoPlaybackFrame(target: Buffer, frameBytes: number, gain: number): BridgeRenderFrame | null {
     if (frameBytes <= 0 || this.pendingBridgePlayback.length <= 0) {
       return null;
     }
@@ -1314,7 +1323,7 @@ export class Leg {
         continue;
       }
       const copyBytes = Math.min(frameBytes - bytesMixed, remainingCurrent);
-      this.mixBridgeFrameIntoPlaybackFrame(target, current.pcm, copyBytes, offsetBytes, bytesMixed);
+      this.mixBridgeFrameIntoPlaybackFrame(target, current.pcm, copyBytes, offsetBytes, bytesMixed, gain);
       bytesMixed += copyBytes;
       current.offsetBytes = offsetBytes + copyBytes;
       if (Number(current.offsetBytes || 0) >= Number(current.bytes || 0)) {
@@ -1359,7 +1368,9 @@ export class Leg {
     bridgeBytes: number,
     bridgeOffsetBytes = 0,
     targetOffsetBytes = 0,
+    gain = 1,
   ): void {
+    const normalizedGain = Number.isFinite(gain) ? Math.max(0, gain) : 1;
     const normalizedBridgeOffset = Math.max(0, Math.min(Number(bridgeOffsetBytes || 0), bridgePcm.length));
     const normalizedTargetOffset = Math.max(0, Math.min(Number(targetOffsetBytes || 0), target.length));
     const bytesToMix = Math.max(
@@ -1374,14 +1385,26 @@ export class Leg {
     if (mixBytes <= 0) {
       return;
     }
+    if (normalizedGain === 0) {
+      return;
+    }
     const sampleCount = mixBytes >> 1;
     const targetView = toPcm16View(target, normalizedTargetOffset, sampleCount);
     const sourceView = toPcm16View(bridgePcm, normalizedBridgeOffset, sampleCount);
     if (targetView && sourceView) {
+      if (normalizedGain === 1) {
+        for (let index = 0; index < sampleCount; index += 1) {
+          const mixed = targetView[index] + sourceView[index];
+          targetView[index] = mixed < -32768 ? -32768
+            : mixed > 32767 ? 32767
+            : mixed | 0;
+        }
+        return;
+      }
       // Hot path (50 mix ops/sec/leg): keep the inner loop body inline so V8
       // doesn't dispatch into clampPcm16 per sample.
       for (let index = 0; index < sampleCount; index += 1) {
-        const mixed = targetView[index] + sourceView[index];
+        const mixed = targetView[index] + sourceView[index] * normalizedGain;
         targetView[index] = mixed < -32768 ? -32768
           : mixed > 32767 ? 32767
           : mixed | 0;
@@ -1391,7 +1414,7 @@ export class Leg {
     for (let offset = 0; offset < mixBytes; offset += 2) {
       const targetReadOffset = normalizedTargetOffset + offset;
       const sourceReadOffset = normalizedBridgeOffset + offset;
-      const mixed = target.readInt16LE(targetReadOffset) + bridgePcm.readInt16LE(sourceReadOffset);
+      const mixed = target.readInt16LE(targetReadOffset) + bridgePcm.readInt16LE(sourceReadOffset) * normalizedGain;
       target.writeInt16LE(mixed < -32768 ? -32768 : mixed > 32767 ? 32767 : mixed | 0, targetReadOffset);
     }
   }

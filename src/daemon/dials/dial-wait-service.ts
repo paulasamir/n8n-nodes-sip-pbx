@@ -11,13 +11,19 @@ import {
   type DialWaitSelection,
 } from "../../shared/result-events";
 import { normalizeStringList } from "../../shared/string-utils";
+import { TerminalSnapshotStore } from "../core/terminal-snapshot-store";
 import type { Dial, DialEvent } from "./types";
 
 export class DialWaitService {
   private readonly registry: MapRegistry<string, Dial>;
+  private readonly terminalSnapshots: TerminalSnapshotStore<DialEvent & { dialId: string }>;
 
-  constructor(registry: MapRegistry<string, Dial>) {
+  constructor(
+    registry: MapRegistry<string, Dial>,
+    terminalSnapshots?: TerminalSnapshotStore<DialEvent & { dialId: string }>,
+  ) {
     this.registry = registry;
+    this.terminalSnapshots = terminalSnapshots || new TerminalSnapshotStore<DialEvent & { dialId: string }>();
   }
 
   async waitForEvent(
@@ -26,15 +32,22 @@ export class DialWaitService {
     context?: RequestContext | null,
   ): Promise<DialEvent & { dialId: string; stillDialingLegCount: number }> {
     const dialIds = Array.from(new Set(normalizeStringList(dialId)));
+    const snapshots = dialIds.map((currentDialId) => ({
+      dialId: currentDialId,
+      snapshot: this.terminalSnapshots.get(currentDialId),
+    }));
     const records = dialIds.map((currentDialId) => ({
       dialId: currentDialId,
       record: this.registry.get(currentDialId),
     }));
-    const missing = records.find((entry) => !entry.record)?.dialId || "";
+    const missing = records.find((entry, index) => !entry.record && !snapshots[index]?.snapshot)?.dialId || "";
     if (missing || records.length === 0) {
       throw daemonError("invalid_dial_wait", `Dial ${missing || String(dialId || "")} cannot be waited`);
     }
-    const waitRecords = records as Array<{ dialId: string; record: Dial }>;
+    const waitRecords = records.filter((entry): entry is { dialId: string; record: Dial } => Boolean(entry.record));
+    const waitSnapshotRecords = snapshots.filter(
+      (entry): entry is { dialId: string; snapshot: DialEvent & { dialId: string } } => Boolean(entry.snapshot),
+    );
     const waitTickets = waitRecords.map(({ record }) => record.retain("dial-wait"));
     try {
       console.error(`[sip-pbx:dial-wait] begin; dialIds=${dialIds.join(",")}; timeoutMs=${timeoutMsValue(input)}; waitOutputs=${Array.from(enabledOutputNames(input)).join(",") || "none"}`);
@@ -63,6 +76,17 @@ export class DialWaitService {
             stillDialingLegCount: stillDialingCount(record),
           };
         }
+      }
+      for (const { dialId: currentDialId, snapshot } of waitSnapshotRecords) {
+        if (!matches(snapshot)) {
+          continue;
+        }
+        console.error(`[sip-pbx:dial-wait] terminal snapshot hit; dial=${currentDialId}; event=${snapshot.eventType}; reason=${String(snapshot.reason || "") || "none"}`);
+        return {
+          dialId: currentDialId,
+          ...snapshot,
+          stillDialingLegCount: 0,
+        };
       }
 
       const tickets = waitRecords.map(({ dialId: currentDialId, record }) => ({

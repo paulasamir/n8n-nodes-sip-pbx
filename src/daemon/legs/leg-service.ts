@@ -1,5 +1,6 @@
 import { daemonError } from "../core/daemon-error";
 import { combineTickets, type RetentionTicket } from "../core/operation-retainer";
+import { TerminalSnapshotStore } from "../core/terminal-snapshot-store";
 import { nowMs } from "../core/time";
 import { MapRegistry } from "../../shared/map-registry";
 import { CALL_EVENT_DTMF, CALL_EVENT_ENDED, CALL_EVENT_INTERRUPT, LEG_STATUS_ENDED } from "../../shared/result-events";
@@ -7,10 +8,16 @@ import { Leg, type LegEvent, type LegInput, type LegStatus } from "./types";
 
 export class LegService {
   private readonly registry: MapRegistry<string, Leg>;
+  private readonly terminalSnapshots: TerminalSnapshotStore<{ legId: string; event: LegEvent }>;
   private onLegEnded: (leg: Leg, reason: string) => Promise<void> | void;
 
-  constructor(registry: MapRegistry<string, Leg>, onLegEnded?: (leg: Leg, reason: string) => Promise<void> | void) {
+  constructor(
+    registry: MapRegistry<string, Leg>,
+    onLegEnded?: (leg: Leg, reason: string) => Promise<void> | void,
+    terminalSnapshots?: TerminalSnapshotStore<{ legId: string; event: LegEvent }>,
+  ) {
     this.registry = registry;
+    this.terminalSnapshots = terminalSnapshots || new TerminalSnapshotStore<{ legId: string; event: LegEvent }>();
     this.onLegEnded = onLegEnded || (() => undefined);
   }
 
@@ -125,11 +132,16 @@ export class LegService {
   }
 
   private async handleLegDestroy(leg: Leg, reason: string): Promise<void> {
-    leg.publishEvent({
+    const event: LegEvent = {
       eventType: CALL_EVENT_ENDED,
       reason,
       createdAt: leg.finalizedAt || nowMs(),
+    };
+    this.terminalSnapshots.remember(leg.legId, {
+      legId: leg.legId,
+      event,
     });
+    leg.publishEvent(event);
     leg.rejectEventWaiters(new Error("leg_finalized"));
     try {
       await Promise.resolve(this.onLegEnded(leg, reason));

@@ -435,6 +435,14 @@ export function buildActionNodeProperties(): UiProperty[] {
     ...buildWebSocketDialProfileOptionCollections({ resource: ["dial"], operation: ["dial.make"], callMode: ["websocket"] }),
     { displayName: "Overall Timeout (Seconds)", name: "dialTimeoutSeconds", type: "number", default: OPTION_DEFAULTS.dial.waitTimeoutSeconds, displayOptions: { show: { resource: ["dial"], operation: ["dial.wait"] } } },
     {
+      displayName: "Master Leg ID",
+      name: "legId",
+      type: "string",
+      default: "",
+      description: "Optional leg to retain for the duration of the wait so it does not expire by TTL.",
+      displayOptions: { show: { resource: ["dial"], operation: ["dial.wait"] } },
+    },
+    {
       displayName: "Additional Outputs",
       name: "waitEventOutputs",
       type: "multiOptions",

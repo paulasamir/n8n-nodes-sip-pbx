@@ -94,6 +94,7 @@ async function testDialWaitForEventRouting() {
   const fakeRuntime = {
     async waitForDialEvent(dialId, options) {
       assert.deepStrictEqual(options.waitEventOutputs, ["ringing", "rejected"]);
+      assert.strictEqual(options.legId, "leg-retained-1");
       return {
         eventType: "rejected",
         dialId,
@@ -109,6 +110,7 @@ async function testDialWaitForEventRouting() {
     Object.assign(node, createExecuteContext({
       resource: "dial",
       operation: "dial.wait",
+      legId: "leg-retained-1",
       dialTimeoutSeconds: 15,
       waitEventOutputs: [["ringing", "rejected"]],
     }, [{ json: { dialId: "dial-1" } }]));
@@ -376,6 +378,38 @@ async function testDialMakeAndBridge() {
     assert.deepStrictEqual(unavailableOutputs[0], []);
     assert.strictEqual(unavailableOutputs[1][0].json.reason, "no_available_endpoints");
     assert.deepStrictEqual(unavailableOutputs[1][0].json.extensionNumbers, ["999"]);
+
+    const normalizedUnavailableExtensionNode = new SipPbx();
+    Object.assign(normalizedUnavailableExtensionNode, createExecuteContext({
+      resource: "dial",
+      operation: "dial.make",
+      callMode: "extension",
+      callStrategy: "parallel",
+      extensionNumbers: "999",
+      dialOptions: {},
+    }, [{ json: {} }]));
+    fakeRuntime.makeDial = async () => {
+      const error = new Error("Extension dial requires active registrations");
+      error.code = "invalid_request";
+      throw error;
+    };
+    const normalizedUnavailableOutputs = await normalizedUnavailableExtensionNode.execute();
+    assert.deepStrictEqual(normalizedUnavailableOutputs[0], []);
+    assert.strictEqual(normalizedUnavailableOutputs[1][0].json.reason, "no_available_endpoints");
+    assert.deepStrictEqual(normalizedUnavailableOutputs[1][0].json.extensionNumbers, ["999"]);
+
+    fakeRuntime.makeDial = async (input) => {
+      seen.makeDial.push(input);
+      if (input.callMode === "extension" && Array.isArray(input.extensionNumbers) && input.extensionNumbers.includes("999")) {
+        const error = new Error("Extension dial requires active registrations");
+        error.code = "invalid_dial_targets";
+        throw error;
+      }
+      if (input.callMode === "direct") {
+        return { dialId: "dial-created-1", legId: "leg-created-1" };
+      }
+      return { dialId: "dial-created-1" };
+    };
 
     const makeDirectDialNode = new SipPbx();
     Object.assign(makeDirectDialNode, createExecuteContext({

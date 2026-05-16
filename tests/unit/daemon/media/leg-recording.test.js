@@ -7,6 +7,14 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createConstantPcm16Frame(sampleValue, frameBytes = 320) {
+  const buffer = Buffer.alloc(frameBytes);
+  for (let offset = 0; offset < frameBytes; offset += 2) {
+    buffer.writeInt16LE(sampleValue, offset);
+  }
+  return buffer;
+}
+
 function createFakeTransport() {
   let listener = null;
   return {
@@ -27,6 +35,59 @@ function createFakeTransport() {
     close() {},
   };
 }
+
+test("Leg bridge playback is ducked by higher-priority local playback", async () => {
+  const { Leg } = require("../../../../build-src/daemon/media/worker/entities/leg.js");
+
+  const sentFrames = [];
+  let listener = null;
+  const transport = {
+    transportType: "websocket",
+    configure: async () => ({}),
+    getDetails: () => ({}),
+    subscribe(next) {
+      listener = next;
+      return () => {
+        listener = null;
+      };
+    },
+    sendPlaybackPcm: async (pcm, _marker, bytes) => {
+      sentFrames.push(Buffer.from(pcm.subarray(0, bytes)));
+      return true;
+    },
+    sendDtmf: async () => false,
+    close() {},
+  };
+
+  const leg = new Leg({
+    legId: "leg-bridge-ducking",
+    transportType: "websocket",
+    transport,
+  });
+
+  try {
+    const originalEnsurePlaybackLoop = leg.ensurePlaybackLoop.bind(leg);
+    leg.ensurePlaybackLoop = () => undefined;
+
+    leg.registerPlayback({
+      mediaId: "playback-primary",
+      kind: "playback",
+      duckingFactor: 0.5,
+      pcm: createConstantPcm16Frame(4000),
+    });
+
+    const bridgePromise = leg.sendBridgePcm(createConstantPcm16Frame(2000));
+    leg.ensurePlaybackLoop = originalEnsurePlaybackLoop;
+    leg.ensurePlaybackLoop();
+
+    const bridgeResult = await bridgePromise;
+    assert.strictEqual(bridgeResult, true);
+    assert.ok(sentFrames.length > 0);
+    assert.strictEqual(sentFrames[0].readInt16LE(0), 5000);
+  } finally {
+    leg.close();
+  }
+});
 
 test("Leg.startRecording prepends inbound pre-roll without duplicating pending frames", async () => {
   const { Leg } = require("../../../../build-src/daemon/media/worker/entities/leg.js");

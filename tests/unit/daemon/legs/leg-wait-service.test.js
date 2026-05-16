@@ -168,3 +168,32 @@ test("LegWaitService finalizes a shorter exact rule after interdigit timeout whe
   assert.strictEqual(result.matchedLabel, "Two Digits");
   assert.strictEqual(result.digits, "12");
 });
+
+test("LegWaitService returns terminal snapshot when a leg has already ended and been removed", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { LegWaitService } = require("../../../../build-src/daemon/legs/leg-wait-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+  const { TerminalSnapshotStore } = require("../../../../build-src/daemon/core/terminal-snapshot-store.js");
+
+  const registry = new MapRegistry();
+  const terminalSnapshots = new TerminalSnapshotStore();
+  const legService = new LegService(registry, undefined, terminalSnapshots);
+  const waitService = new LegWaitService(registry, terminalSnapshots);
+
+  const leg = legService.createLeg({
+    legId: "leg-ended-snapshot",
+    direction: "inbound",
+    transportType: "websocket",
+  });
+
+  legService.hangupLeg(leg.legId, "test_completed");
+
+  const result = await waitService.waitForEvent(leg.legId, {
+    timeoutMs: 250,
+  });
+
+  assert.strictEqual(result.legId, leg.legId);
+  assert.strictEqual(result.eventType, "ended");
+  assert.strictEqual(result.output, "ended");
+  assert.strictEqual(result.reason, "test_completed");
+});
