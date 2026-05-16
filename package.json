@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-sip-pbx",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SIP PBX community nodes for n8n with daemon-backed call control, playback, recording, bridging, and queue orchestration",
   "keywords": [
     "n8n-community-node-package",
