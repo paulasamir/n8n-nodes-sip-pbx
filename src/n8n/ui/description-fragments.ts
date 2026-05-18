@@ -1,4 +1,20 @@
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
+import {
+  INTERRUPT_SELECTION_DTMF,
+  INTERRUPT_SELECTION_SILENCE,
+  INTERRUPT_SELECTION_VOICE,
+  type InterruptSelection,
+} from "../../shared/interrupt-selections";
+import {
+  SIP_AUDIO_CODEC_ALAW,
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_G729,
+  SIP_AUDIO_CODEC_MULAW,
+  SIP_AUDIO_CODEC_OPUS,
+  SIP_DTMF_METHOD_INBAND,
+  SIP_DTMF_METHOD_INFO,
+  SIP_DTMF_METHOD_RFC2833,
+} from "../../shared/sip-media-filters";
 
 export type UiOption = {
   name: string;
@@ -67,14 +83,14 @@ export function buildHeadersCollectionProperty(displayName: string, name: string
     name,
     type: "fixedCollection",
     typeOptions: { multipleValues: true },
-    default: {},
+    default: OPTION_DEFAULTS.common.object,
     options: [
       {
         name: "item",
         displayName: "Header",
         values: [
-          { displayName: "Name", name: "name", type: "string", default: "", required: true },
-          { displayName: "Value", name: "value", type: "string", default: "" },
+          { displayName: "Name", name: "name", type: "string", default: OPTION_DEFAULTS.common.string, required: true },
+          { displayName: "Value", name: "value", type: "string", default: OPTION_DEFAULTS.common.string },
         ],
       },
     ],
@@ -102,19 +118,47 @@ export function buildSipDialOptionEntries(): UiProperty[] {
       name: "sequentialAttemptTimeoutSeconds",
       type: "number",
       default: OPTION_DEFAULTS.dial.sequentialAttemptTimeoutSeconds,
-      displayOptions: { show: { callStrategy: ["sequential"] } },
     },
     {
       displayName: "Sequential Gap (Seconds)",
       name: "sequentialGapSeconds",
       type: "number",
       default: OPTION_DEFAULTS.dial.sequentialGapSeconds,
-      displayOptions: { show: { callStrategy: ["sequential"] } },
     },
-    { displayName: "Caller Number", name: "callerNumber", type: "string", default: "" },
-    { displayName: "Caller Name", name: "callerName", type: "string", default: "" },
+    { displayName: "Caller Number", name: "callerNumber", type: "string", default: OPTION_DEFAULTS.common.string },
+    { displayName: "Caller Name", name: "callerName", type: "string", default: OPTION_DEFAULTS.common.string },
     buildHeadersCollectionProperty("Custom SIP Headers", "customSipHeaders", {}),
   ];
+}
+
+export function buildSipCodecFilterOption(): UiProperty {
+  return {
+    displayName: "Codecs",
+    name: "codecs",
+    type: "multiOptions",
+    default: [...OPTION_DEFAULTS.sipMedia.codecs],
+    options: [
+      { name: "Opus", value: SIP_AUDIO_CODEC_OPUS },
+      { name: "G.722", value: SIP_AUDIO_CODEC_G722 },
+      { name: "G.711 A-law", value: SIP_AUDIO_CODEC_ALAW },
+      { name: "G.711 μ-law", value: SIP_AUDIO_CODEC_MULAW },
+      { name: "G.729", value: SIP_AUDIO_CODEC_G729 },
+    ],
+  };
+}
+
+export function buildSipDtmfMethodsFilterOption(): UiProperty {
+  return {
+    displayName: "DTMF Methods",
+    name: "dtmfMethods",
+    type: "multiOptions",
+    default: [...OPTION_DEFAULTS.sipMedia.dtmfMethods],
+    options: [
+      { name: "RFC2833", value: SIP_DTMF_METHOD_RFC2833 },
+      { name: "SIP INFO", value: SIP_DTMF_METHOD_INFO },
+      { name: "Inband", value: SIP_DTMF_METHOD_INBAND },
+    ],
+  };
 }
 
 export function buildExtensionDialOptionEntries(input?: { includeOnlyFreeEndpoints?: boolean }): UiProperty[] {
@@ -127,26 +171,25 @@ export function buildExtensionDialOptionEntries(input?: { includeOnlyFreeEndpoin
     ...options,
     {
       displayName: "Only Free Endpoints",
-      name: "extensionListOnlyFreeEndpoints",
+      name: "extensionOnlyFreeEndpoints",
       type: "boolean",
-      default: OPTION_DEFAULTS.dial.extensionListOnlyFreeEndpoints,
+      default: OPTION_DEFAULTS.dial.extensionOnlyFreeEndpoints,
       description: "When enabled, the dial targets only endpoints that are registered and not already in a live call. When disabled, it targets all matching registered endpoints.",
     },
   ];
 }
 
-export function buildAddOptionsCollectionProperty(
-  name: string,
-  show: Record<string, unknown>,
+export function buildOptionsCollectionProperty(
+  displayOptions: { show?: Record<string, unknown>; hide?: Record<string, unknown> },
   options: UiProperty[],
 ): UiProperty {
   return {
     displayName: "Options",
-    name,
+    name: "options",
     type: "collection",
     placeholder: "Add Option",
-    default: {},
-    displayOptions: { show },
+    default: OPTION_DEFAULTS.common.object,
+    displayOptions,
     options,
   };
 }
@@ -169,19 +212,19 @@ export function buildSipListenerOptionEntries(scope: "trunk" | "extensions"): Ui
       displayName: "Local Bind IP",
       name: "localBindIp",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
     },
     {
       displayName: "Advertised IP",
       name: "advertisedIp",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
     },
     {
       displayName: "Realm",
       name: "realm",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
     },
   ];
   if (scope === "extensions") {
@@ -217,7 +260,7 @@ export function buildIdOption(displayName: string, name: "legId" | "dialId" | "m
     displayName,
     name,
     type: "string",
-    default: "",
+    default: OPTION_DEFAULTS.common.string,
   };
 }
 
@@ -227,18 +270,99 @@ export function buildStaticCredentialsCollectionProperty(name: string, show: Rec
     name,
     type: "fixedCollection",
     typeOptions: { multipleValues: true },
-    default: {},
+    default: OPTION_DEFAULTS.common.object,
     displayOptions: { show },
     options: [
       {
         name: "item",
         displayName: "Credential",
         values: [
-          { displayName: "Username", name: "username", type: "string", default: "", required: true },
-          { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: "", required: true },
-          { displayName: "Extension", name: "extension", type: "string", default: "", required: true },
+          { displayName: "Username", name: "username", type: "string", default: OPTION_DEFAULTS.common.string, required: true },
+          { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: OPTION_DEFAULTS.common.string, required: true },
+          { displayName: "Extension", name: "extension", type: "string", default: OPTION_DEFAULTS.common.string, required: true },
         ],
       },
     ],
   };
+}
+
+export function buildInterruptOnProperty(input: {
+  show: Record<string, unknown>;
+  hide?: Record<string, unknown>;
+  allowedSelections: InterruptSelection[];
+  description?: string;
+}): UiProperty {
+  return {
+    displayName: "Interrupt On",
+    name: "interruptOn",
+    type: "multiOptions",
+    default: OPTION_DEFAULTS.common.array,
+    description: input.description,
+    displayOptions: input.hide ? { show: input.show, hide: input.hide } : { show: input.show },
+    options: input.allowedSelections.map((selection) => ({
+      name:
+        selection === INTERRUPT_SELECTION_DTMF
+          ? "DTMF"
+          : selection === INTERRUPT_SELECTION_VOICE
+            ? "Voice"
+            : "Silence",
+      value: selection,
+    })),
+  };
+}
+
+export function buildInterruptDrivenOptionsCollections(input: {
+  show: Record<string, unknown>;
+  dependentSelection: InterruptSelection;
+  baseOptions: UiProperty[];
+  dependentOptions: UiProperty[];
+}): UiProperty[] {
+  return [
+    buildOptionsCollectionProperty(
+      {
+        show: input.show,
+        hide: { interruptOn: [input.dependentSelection] },
+      },
+      input.baseOptions,
+    ),
+    buildOptionsCollectionProperty(
+      {
+        show: {
+          ...input.show,
+          interruptOn: [input.dependentSelection],
+        },
+      },
+      [
+        ...input.dependentOptions,
+        ...input.baseOptions,
+      ],
+    ),
+  ];
+}
+
+export function buildInterruptPropertySet(input: {
+  interruptShow: Record<string, unknown>;
+  allowedSelections: InterruptSelection[];
+  description?: string;
+  dependentSelection: InterruptSelection;
+  dependentOptions: UiProperty[];
+  variants: Array<{
+    show: Record<string, unknown>;
+    baseOptions: UiProperty[];
+  }>;
+}): UiProperty[] {
+  return [
+    buildInterruptOnProperty({
+      show: input.interruptShow,
+      allowedSelections: input.allowedSelections,
+      description: input.description,
+    }),
+    ...input.variants.flatMap((variant) =>
+      buildInterruptDrivenOptionsCollections({
+        show: variant.show,
+        dependentSelection: input.dependentSelection,
+        baseOptions: variant.baseOptions,
+        dependentOptions: input.dependentOptions,
+      })),
+  ];
 }

@@ -1085,7 +1085,7 @@ function createMediaWorkerRuntimeController(input: {
       transportConfig,
       onVoiceActivity: (localLegId, level, durationMs) => {
         for (const mediaId of runtimeWorker.collectVoiceInterruptTargets(localLegId, level, durationMs)) {
-          onMediaInterrupt(localLegId, mediaId, "voice", {
+          onMediaInterrupt(localLegId, mediaId, "media_voice", {
             voiceLevel: level,
             voiceDurationMs: durationMs,
           });
@@ -1099,7 +1099,7 @@ function createMediaWorkerRuntimeController(input: {
       },
       onInboundDtmf: (localLegId, digits) => {
         for (const mediaId of runtimeWorker.collectDtmfInterruptTargets(localLegId)) {
-          onMediaInterrupt(localLegId, mediaId, "dtmf", {
+          onMediaInterrupt(localLegId, mediaId, "call_dtmf", {
             digit: digits.slice(0, 1) || null,
             digits,
           });
@@ -1187,7 +1187,7 @@ function createMediaWorkerRuntimeController(input: {
       transportConfig,
       onVoiceActivity: (localLegId, level, durationMs) => {
         for (const mediaId of runtimeWorker.collectVoiceInterruptTargets(localLegId, level, durationMs)) {
-          onMediaInterrupt(localLegId, mediaId, "voice", {
+          onMediaInterrupt(localLegId, mediaId, "media_voice", {
             voiceLevel: level,
             voiceDurationMs: durationMs,
           });
@@ -1201,7 +1201,7 @@ function createMediaWorkerRuntimeController(input: {
       },
       onInboundDtmf: (localLegId, digits) => {
         for (const mediaId of runtimeWorker.collectDtmfInterruptTargets(localLegId)) {
-          onMediaInterrupt(localLegId, mediaId, "dtmf", {
+          onMediaInterrupt(localLegId, mediaId, "call_dtmf", {
             digit: digits.slice(0, 1) || null,
             digits,
           });

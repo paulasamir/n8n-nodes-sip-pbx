@@ -1,6 +1,7 @@
 import { daemonError } from "../core/daemon-error";
 import type { RequestContext } from "../core/request-context";
 import { nowMs } from "../core/time";
+import { CALL_INTERRUPT_REASONS, type CallInterruptReason } from "../../shared/interrupt-reasons";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { MapRegistry } from "../../shared/map-registry";
 import { TerminalSnapshotStore } from "../core/terminal-snapshot-store";
@@ -28,6 +29,8 @@ type WaitInput = {
   timeoutMs: number;
   interdigitTimeoutMs?: number;
   rules?: WaitRule[];
+  interruptReasons?: CallInterruptReason[];
+  clearDtmfBuffer?: boolean;
   waitDtmfFallbackEnabled?: boolean;
   waitDtmfMultiDigitFallbackEnabled?: boolean;
   dtmfTerminatorDigit?: string;
@@ -76,6 +79,13 @@ type WaitOutput =
 type PerLegState = {
   digits: string;
   lastDigitAt: number;
+};
+
+type ProcessEventResult = {
+  digits: string;
+  output: WaitOutput | null;
+  lastDigitAt?: number;
+  awaitingMoreDigits: boolean;
 };
 
 function timeoutOutput(legId: string, digits?: string): WaitOutput {
@@ -140,6 +150,10 @@ export class LegWaitService {
       : [];
     const timeoutMs = Math.max(0, Number(params.timeoutMs || 0));
     const interdigitTimeoutMs = Math.max(0, Number(params.interdigitTimeoutMs == null ? Math.round(OPTION_DEFAULTS.call.interdigitTimeoutSeconds * 1000) : params.interdigitTimeoutMs) || 0);
+    const interruptReasons = Array.isArray(params.interruptReasons)
+      ? Array.from(new Set(params.interruptReasons.filter((reason): reason is CallInterruptReason => CALL_INTERRUPT_REASONS.includes(reason))))
+      : [];
+    const clearDtmfBuffer = Boolean(params.clearDtmfBuffer);
     const enableDtmfFallback = !!params.waitDtmfFallbackEnabled;
     const enableMultiDigitFallback = !!params.waitDtmfMultiDigitFallbackEnabled;
     const terminatorDigit = String(params.dtmfTerminatorDigit || "").trim();
@@ -147,6 +161,14 @@ export class LegWaitService {
     const stateByLegId = new Map<string, PerLegState>();
     for (const currentLegId of legIds) {
       stateByLegId.set(currentLegId, { digits: "", lastDigitAt: 0 });
+    }
+
+    let deadlineAtMs = nowMs() + timeoutMs;
+
+    if (clearDtmfBuffer) {
+      for (const { record } of waitRecords) {
+        record.consumeQueuedEventsMatching((event) => event.eventType === CALL_EVENT_DTMF);
+      }
     }
 
     for (const { legId: currentLegId, record } of waitRecords) {
@@ -161,12 +183,16 @@ export class LegWaitService {
         enableMultiDigitFallback,
         terminatorDigit,
         interdigitTimeoutMs,
+        interruptReasons,
         allowFinalize: false,
       });
       state.digits = result.digits;
       state.lastDigitAt = result.lastDigitAt || state.lastDigitAt;
       if (result.output) {
         return result.output;
+      }
+      if (result.awaitingMoreDigits && interdigitTimeoutMs > 0 && state.lastDigitAt > 0) {
+        deadlineAtMs = state.lastDigitAt + interdigitTimeoutMs;
       }
     }
     for (const { legId: currentLegId, snapshot } of waitSnapshotRecords) {
@@ -177,6 +203,7 @@ export class LegWaitService {
         enableMultiDigitFallback,
         terminatorDigit,
         interdigitTimeoutMs,
+        interruptReasons,
         allowFinalize: false,
       });
       state.digits = result.digits;
@@ -184,13 +211,15 @@ export class LegWaitService {
       if (result.output) {
         return result.output;
       }
+      if (result.awaitingMoreDigits && interdigitTimeoutMs > 0 && state.lastDigitAt > 0) {
+        deadlineAtMs = state.lastDigitAt + interdigitTimeoutMs;
+      }
     }
 
     if (waitRecords.every(({ record }) => record.status === LEG_STATUS_ENDED)) {
       throw daemonError("invalid_leg_wait", `Leg ${legIds[0] || ""} cannot be waited`);
     }
 
-    const startedAt = nowMs();
     while (true) {
       for (const { legId: currentLegId, record } of waitRecords) {
         const queued = record.shiftEvent();
@@ -204,6 +233,7 @@ export class LegWaitService {
           enableMultiDigitFallback,
           terminatorDigit,
           interdigitTimeoutMs,
+          interruptReasons,
           allowFinalize: false,
         });
         state.digits = result.digits;
@@ -211,11 +241,13 @@ export class LegWaitService {
         if (result.output) {
           return result.output;
         }
+        if (result.awaitingMoreDigits && interdigitTimeoutMs > 0 && state.lastDigitAt > 0) {
+          deadlineAtMs = state.lastDigitAt + interdigitTimeoutMs;
+        }
       }
 
-      const elapsed = nowMs() - startedAt;
-      const remainingOverall = Math.max(0, timeoutMs - elapsed);
-      if (remainingOverall <= 0) {
+      const remainingWaitMs = Math.max(0, deadlineAtMs - nowMs());
+      if (remainingWaitMs <= 0) {
         for (const { legId: currentLegId } of waitRecords) {
           const state = stateByLegId.get(currentLegId)!;
           const finalized = this.finalizeDigits(currentLegId, state.digits, rules, {
@@ -230,25 +262,9 @@ export class LegWaitService {
         return timeoutOutput(legIds[0] || "");
       }
 
-      const interdigitRemaining = waitRecords.reduce<number>((minimum, { legId: currentLegId }) => {
-        const state = stateByLegId.get(currentLegId)!;
-        const remaining =
-          state.digits && interdigitTimeoutMs > 0 && state.lastDigitAt > 0
-            ? Math.max(0, interdigitTimeoutMs - (nowMs() - state.lastDigitAt))
-            : 0;
-        if (!remaining) {
-          return minimum;
-        }
-        return minimum === 0 ? remaining : Math.min(minimum, remaining);
-      }, 0);
-      const waitTimeoutMs =
-        interdigitRemaining > 0
-          ? Math.min(remainingOverall, interdigitRemaining)
-          : remainingOverall;
-
       const tickets = waitRecords.map(({ legId: currentLegId, record }) => ({
         legId: currentLegId,
-        ticket: record.waitForEventCancellable(() => true, waitTimeoutMs),
+        ticket: record.waitForEventCancellable(() => true, remainingWaitMs),
       }));
       try {
         const outcome = await this.waitForAnyWithCancellation(
@@ -270,12 +286,16 @@ export class LegWaitService {
           enableMultiDigitFallback,
           terminatorDigit,
           interdigitTimeoutMs,
+          interruptReasons,
           allowFinalize: false,
         });
         state.digits = result.digits;
         state.lastDigitAt = result.lastDigitAt || state.lastDigitAt;
         if (result.output) {
           return result.output;
+        }
+        if (result.awaitingMoreDigits && interdigitTimeoutMs > 0 && state.lastDigitAt > 0) {
+          deadlineAtMs = state.lastDigitAt + interdigitTimeoutMs;
         }
       } catch (error) {
         for (const { legId: currentLegId, ticket } of tickets) {
@@ -287,35 +307,8 @@ export class LegWaitService {
         if (!this.isWaitTimeout(error)) {
           throw error;
         }
-
-        const timedOutAt = nowMs();
-        const elapsedAfterWait = timedOutAt - startedAt;
-        const remainingOverallAfterWait = Math.max(0, timeoutMs - elapsedAfterWait);
-        if (remainingOverallAfterWait <= 0) {
-          for (const { legId: currentLegId } of waitRecords) {
-            const state = stateByLegId.get(currentLegId)!;
-            const finalized = this.finalizeDigits(currentLegId, state.digits, rules, {
-              enableDtmfFallback,
-              enableMultiDigitFallback,
-              terminatorDigit,
-            });
-            if (finalized) {
-              return finalized;
-            }
-          }
-          return timeoutOutput(legIds[0] || "");
-        }
-
         for (const { legId: currentLegId } of waitRecords) {
           const state = stateByLegId.get(currentLegId)!;
-          const interdigitExpired =
-            state.digits
-            && interdigitTimeoutMs > 0
-            && state.lastDigitAt > 0
-            && timedOutAt - state.lastDigitAt >= interdigitTimeoutMs;
-          if (!interdigitExpired) {
-            continue;
-          }
           const finalized = this.finalizeDigits(currentLegId, state.digits, rules, {
             enableDtmfFallback,
             enableMultiDigitFallback,
@@ -327,6 +320,7 @@ export class LegWaitService {
           state.digits = "";
           state.lastDigitAt = 0;
         }
+        return timeoutOutput(legIds[0] || "");
       }
     }
     } finally {
@@ -374,9 +368,10 @@ export class LegWaitService {
       enableMultiDigitFallback: boolean;
       terminatorDigit: string;
       interdigitTimeoutMs: number;
+      interruptReasons: CallInterruptReason[];
       allowFinalize: boolean;
     },
-  ): { digits: string; output: WaitOutput | null; lastDigitAt?: number } {
+  ): ProcessEventResult {
     if (event.eventType === CALL_EVENT_ENDED) {
       return {
         digits: input.digits,
@@ -387,9 +382,17 @@ export class LegWaitService {
           reason: event.reason,
           createdAt: event.createdAt,
         },
+        awaitingMoreDigits: false,
       };
     }
     if (event.eventType === CALL_EVENT_INTERRUPT) {
+      if (!input.interruptReasons.includes(event.reason as CallInterruptReason)) {
+        return {
+          digits: input.digits,
+          output: null,
+          awaitingMoreDigits: false,
+        };
+      }
       return {
         digits: input.digits,
         output: {
@@ -399,10 +402,11 @@ export class LegWaitService {
           reason: event.reason,
           createdAt: event.createdAt,
         },
+        awaitingMoreDigits: false,
       };
     }
     if (event.eventType !== "dtmf") {
-      return { digits: input.digits, output: null };
+      return { digits: input.digits, output: null, awaitingMoreDigits: false };
     }
 
     const nextDigits = `${input.digits}${String(event.digits || "")}`;
@@ -424,6 +428,7 @@ export class LegWaitService {
           createdAt: event.createdAt,
         },
         lastDigitAt: event.createdAt,
+        awaitingMoreDigits: false,
       };
     }
 
@@ -443,6 +448,7 @@ export class LegWaitService {
             createdAt: event.createdAt,
           },
           lastDigitAt: event.createdAt,
+          awaitingMoreDigits: false,
         };
       }
       if (input.enableDtmfFallback) {
@@ -457,12 +463,14 @@ export class LegWaitService {
             createdAt: event.createdAt,
           },
           lastDigitAt: event.createdAt,
+          awaitingMoreDigits: false,
         };
       }
       return {
         digits: "",
         output: null,
         lastDigitAt: event.createdAt,
+        awaitingMoreDigits: false,
       };
     }
 
@@ -477,6 +485,7 @@ export class LegWaitService {
           createdAt: event.createdAt,
         },
         lastDigitAt: event.createdAt,
+        awaitingMoreDigits: false,
       };
     }
 
@@ -485,12 +494,14 @@ export class LegWaitService {
         digits: nextDigits,
         output: null,
         lastDigitAt: event.createdAt,
+        awaitingMoreDigits: !noWaitMode,
       };
     }
 
     return {
       digits: "",
       output: null,
+      awaitingMoreDigits: false,
     };
   }
 

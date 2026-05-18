@@ -12,6 +12,7 @@ import {
   CallWaitBranchInterrupt,
   CallWaitBranchTimeout,
   DialWaitBranchAnswered,
+  DialWaitBranchInterrupted,
   DialWaitBranchFailed,
   DialWaitBranchProgress,
   DialWaitBranchRejected,
@@ -31,6 +32,14 @@ import {
 } from "../shared/branches";
 import { OPTION_DEFAULTS } from "../shared/option-defaults";
 import {
+  CALL_INTERRUPT_REASONS,
+  INTERRUPT_REASON_CALL_DTMF,
+  INTERRUPT_REASON_CALL_ENDED,
+  INTERRUPT_REASON_REQUEST_CANCELLED,
+  type CallInterruptReason,
+} from "../shared/interrupt-reasons";
+import {
+  CALL_EVENT_DTMF,
   CALL_EVENT_ENDED,
   CALL_EVENT_INTERRUPT,
   CALL_WAIT_OUTPUT_DTMF_FALLBACK,
@@ -39,6 +48,7 @@ import {
   CALL_WAIT_OUTPUT_MATCHED,
   DIAL_EVENT_ANSWERED,
   DIAL_EVENT_FAILED,
+  DIAL_EVENT_INTERRUPTED,
   DIAL_EVENT_PROGRESS,
   DIAL_EVENT_REJECTED,
   DIAL_EVENT_RINGING,
@@ -57,6 +67,7 @@ import { daemonError } from "./core/daemon-error";
 import { RequestContext } from "./core/request-context";
 import { newAiToolRequestId, newRecordRequestId, newSocketId, newTriggerKey } from "./core/ids";
 import { TerminalSnapshotStore } from "./core/terminal-snapshot-store";
+import { nowMs } from "./core/time";
 import { MapRegistry } from "../shared/map-registry";
 import { DialService } from "./dials/dial-service";
 import type { Dial, DialEvent } from "./dials/types";
@@ -93,6 +104,11 @@ type WaitCallEventResult = {
 type WaitEventLikeResult = {
   eventType?: string;
   status?: string;
+};
+
+type DialInterruptWait = {
+  promise: Promise<{ eventType: typeof DIAL_EVENT_INTERRUPTED; legId: string; interruptReason: string; digit?: string; digits?: string; stillDialingLegCount: number }>;
+  cancel: () => void;
 };
 
 function closeTriggerSocket(socket: Pick<Socket, "destroy" | "end">): void {
@@ -441,7 +457,7 @@ export class SipPbxDaemon {
     });
     this.legService.setOnLegEnded(async (leg, reason) => {
       try {
-        this.queueService.removeEntryForLeg(leg.legId);
+        this.queueService.removeEntryForLeg(leg.legId, { suppressLegInterrupt: true });
         await this.signalingService.handleLegEnded(leg.legId, reason);
         if (String(leg.triggerMetadata?.ref || "").trim() && String(leg.triggerMetadata?.extensionNumber || "").trim()) {
           const triggerRef = String(leg.triggerMetadata.ref || "").trim();
@@ -773,17 +789,17 @@ export class SipPbxDaemon {
       "call.hangup": ["operation", "legId"],
       "call.bridge": ["operation", "legAId", "legBId", "emitDtmfEvents", "relayDtmf"],
       "call.unbridge": ["operation", "legId"],
-      "call.wait": ["operation", "legId", "legIds", "timeoutSeconds", "interdigitTimeoutSeconds", "rules", "waitDtmfFallbackEnabled", "waitDtmfMultiDigitFallbackEnabled", "dtmfTerminatorDigit"],
-      "dial.make": ["operation", "callMode", "ref", "publicRef", "destination", "extensionNumbers", "extensionListOnlyFreeEndpoints", "workflowScopeKey", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "transportProfile", "websocketStartMode", "openaiApiKey", "openaiRealtimeModel", "openaiRealtimeVoice", "openaiRealtimeInputTranscriptionModel", "openaiRealtimeInstructions", "openaiRealtimePromptId", "openaiRealtimePromptVersion", "openaiRealtimePromptVariablesJson", "geminiApiKey", "geminiLiveModel", "geminiLiveVoice", "geminiLiveApiVersion", "geminiLiveInstructions", "websocketUrl", "websocketHeadersJson", "websocketInitialMessagesJson", "websocketAudioInputEventType", "websocketAudioInputField", "websocketAudioInputSampleRate", "websocketAudioOutputEventTypes", "websocketAudioOutputField", "websocketAudioOutputSampleRate", "sipCredentials"],
+      "call.wait": ["operation", "legIds", "timeoutSeconds", "interdigitTimeoutSeconds", "rules", "interruptReasons", "clearDtmfBuffer", "waitDtmfFallbackEnabled", "waitDtmfMultiDigitFallbackEnabled", "dtmfTerminatorDigit"],
+      "dial.make": ["operation", "callMode", "ref", "publicRef", "destination", "extensionNumbers", "extensionOnlyFreeEndpoints", "workflowScopeKey", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "transportProfile", "websocketStartMode", "openaiApiKey", "openaiRealtimeModel", "openaiRealtimeVoice", "openaiRealtimeInputTranscriptionModel", "openaiRealtimeInstructions", "openaiRealtimePromptId", "openaiRealtimePromptVersion", "openaiRealtimePromptVariablesJson", "geminiApiKey", "geminiLiveModel", "geminiLiveVoice", "geminiLiveApiVersion", "geminiLiveInstructions", "websocketUrl", "websocketHeadersJson", "websocketInitialMessagesJson", "websocketAudioInputEventType", "websocketAudioInputField", "websocketAudioInputSampleRate", "websocketAudioOutputEventTypes", "websocketAudioOutputField", "websocketAudioOutputSampleRate", "sipCredentials", "codecs", "dtmfMethods"],
       "dial.break": ["operation", "dialId", "dialBreakReason"],
-      "dial.wait": ["operation", "dialId", "dialIds", "legId", "dialTimeoutSeconds", "waitEventOutputs"],
-      "media.playAudio": ["operation", "mediaLegId", "sourceType", "binaryProperty", "binaryDataBase64", "filePath", "playbackHttpUrl", "playbackHttpMethod", "playbackHttpHeaders", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
-      "media.playTone": ["operation", "mediaLegId", "tone", "customTone", "repeatInfinite", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
-      "media.recordAudio": ["operation", "mediaLegId", "interruptOnDtmf", "interruptOnSilence", "silenceThreshold", "silenceDurationMs", "maxDurationSeconds", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordOutputType", "recordBinaryProperty", "recordFilePath", "recordHttpUrl", "recordHttpMethod", "recordHttpHeaders", "mediaExecutionMode", "stopOtherMedia"],
-      "media.stopMedia": ["operation", "stopMediaTarget", "stopMediaId", "stopMediaLegId", "stopMediaReason"],
-      "media.wait": ["operation", "waitMediaIds", "waitMediaTimeoutSeconds"],
-      "media.sendDtmf": ["operation", "mediaLegId", "dtmfDigits", "dtmfMethod", "dtmfDurationMs", "dtmfGapMs"],
-      "queue.putLeg": ["operation", "legId", "ref", "queuePlacement", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "extensionListOnlyFreeEndpoints", "rejoinExisting", "retryAttempts", "retryPauseSeconds"],
+      "dial.wait": ["operation", "dialIds", "legId", "dialTimeoutSeconds", "waitEventOutputs", "interruptOnDtmf"],
+      "media.playAudio": ["operation", "legId", "sourceType", "binaryProperty", "binaryDataBase64", "filePath", "playbackHttpUrl", "playbackHttpMethod", "playbackHttpHeaders", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
+      "media.playTone": ["operation", "legId", "tone", "customTone", "repeatInfinite", "interruptOnDtmf", "interruptOnVoice", "voiceThreshold", "voiceDurationMs", "duckingFactor", "mediaExecutionMode", "stopOtherMedia"],
+      "media.recordAudio": ["operation", "legId", "interruptOnDtmf", "interruptOnSilence", "silenceThreshold", "silenceDurationMs", "maxDurationSeconds", "recordFileFormat", "recordWavSampleRate", "recordWavBitDepth", "recordCompressedSampleRate", "recordCompressedBitrate", "recordOutputType", "recordBinaryProperty", "recordFilePath", "recordHttpUrl", "recordHttpMethod", "recordHttpHeaders", "mediaExecutionMode", "stopOtherMedia"],
+      "media.stopMedia": ["operation", "stopMediaTarget", "mediaId", "legId"],
+      "media.wait": ["operation", "mediaIds", "waitMediaTimeoutSeconds"],
+      "media.sendDtmf": ["operation", "legId", "dtmfDigits", "dtmfMethod", "dtmfDurationMs", "dtmfGapMs"],
+      "queue.putLeg": ["operation", "legId", "ref", "queuePlacement", "callStrategy", "callerNumber", "callerName", "customSipHeaders", "sequentialAttemptTimeoutSeconds", "sequentialGapSeconds", "extensionOnlyFreeEndpoints", "rejoinExisting", "retryAttempts", "retryPauseSeconds"],
       "queue.setCallback": ["operation", "legId", "callbackEnabled"],
       "queue.getStats": ["operation", "queueStatsTarget", "ref", "legId"],
       "recording.control": ["operation", "legId", "recordingControlAction"],
@@ -821,6 +837,7 @@ export class SipPbxDaemon {
       if (eventType === DIAL_EVENT_RINGING) return DialWaitBranchRinging;
       if (eventType === DIAL_EVENT_PROGRESS) return DialWaitBranchProgress;
       if (eventType === DIAL_EVENT_ANSWERED) return DialWaitBranchAnswered;
+      if (eventType === DIAL_EVENT_INTERRUPTED) return DialWaitBranchInterrupted;
       if (eventType === DIAL_EVENT_REJECTED) return DialWaitBranchRejected;
       if (eventType === DIAL_EVENT_TIMEOUT) return DialWaitBranchTimeout;
       return DialWaitBranchFailed;
@@ -915,7 +932,7 @@ export class SipPbxDaemon {
       {
         const legIds = Array.isArray(action.legIds)
           ? Array.from(new Set(normalizeStringList(action.legIds)))
-          : normalizeStringList(action.legId);
+          : [];
         const waitTimeoutSeconds =
           action.timeoutSeconds == null || action.timeoutSeconds === ""
             ? OPTION_DEFAULTS.call.waitTimeoutSeconds
@@ -931,6 +948,10 @@ export class SipPbxDaemon {
               timeoutMs: Math.max(0, Math.round(Number(waitTimeoutSeconds) * 1000)),
               interdigitTimeoutMs: Math.max(0, Math.round(Number(action.interdigitTimeoutSeconds == null ? OPTION_DEFAULTS.call.interdigitTimeoutSeconds : action.interdigitTimeoutSeconds) * 1000)),
               rules: normalizeActionRules(action.rules),
+              interruptReasons: Array.isArray(action.interruptReasons)
+                ? normalizeStringList(action.interruptReasons).filter((reason): reason is CallInterruptReason => CALL_INTERRUPT_REASONS.includes(reason as CallInterruptReason))
+                : [],
+              clearDtmfBuffer: Boolean(action.clearDtmfBuffer),
               waitDtmfFallbackEnabled: Boolean(action.waitDtmfFallbackEnabled),
               waitDtmfMultiDigitFallbackEnabled: Boolean(action.waitDtmfMultiDigitFallbackEnabled),
               dtmfTerminatorDigit: String(action.dtmfTerminatorDigit || OPTION_DEFAULTS.call.dtmfTerminatorDigit),
@@ -945,7 +966,7 @@ export class SipPbxDaemon {
       {
         const dialIds = Array.isArray(action.dialIds)
           ? normalizeStringList(action.dialIds)
-          : normalizeStringList(action.dialId);
+          : [];
         const dialRetentions = dialIds.flatMap((dialId) => {
           if (!this.dialService.getDial(dialId)) {
             return [];
@@ -953,13 +974,50 @@ export class SipPbxDaemon {
           return [this.dialService.retainDial(dialId, "action:dial.wait")];
         });
         const retainedLegId = String(action.legId || "").trim();
-        const legRetention = retainedLegId ? this.legService.retainLeg(retainedLegId, "action:dial.wait") : null;
+        const retainedLeg = retainedLegId ? this.legService.getLeg(retainedLegId) : null;
+        const legRetention = retainedLeg ? retainedLeg.retain("action:dial.wait") : null;
+        const interruptWait = retainedLegId
+          ? this.waitForDialInterruptOnLeg(
+            retainedLegId,
+            Boolean(action.interruptOnDtmf),
+            Math.max(0, Math.round(Number(action.dialTimeoutSeconds || OPTION_DEFAULTS.dial.waitTimeoutSeconds) * 1000)),
+            context,
+          )
+          : null;
+        const dialWait = this.dialWaitService.waitForEventCancellable(dialIds.length > 1 ? dialIds : (dialIds[0] || ""), {
+          timeoutMs: Math.max(0, Math.round(Number(action.dialTimeoutSeconds || OPTION_DEFAULTS.dial.waitTimeoutSeconds) * 1000)),
+          waitEventOutputs: Array.isArray(action.waitEventOutputs) ? action.waitEventOutputs as string[] : [],
+        }, context);
         try {
-          return await this.dialWaitService.waitForEvent(dialIds.length > 1 ? dialIds : (dialIds[0] || ""), {
-            timeoutMs: Math.max(0, Math.round(Number(action.dialTimeoutSeconds || OPTION_DEFAULTS.dial.waitTimeoutSeconds) * 1000)),
-            waitEventOutputs: Array.isArray(action.waitEventOutputs) ? action.waitEventOutputs as string[] : [],
-          }, context);
+          let outcome: any;
+          if (!interruptWait) {
+            outcome = await dialWait.promise;
+          } else {
+            outcome = await Promise.race([
+              dialWait.promise,
+              interruptWait.promise.catch((error) => {
+                if (error instanceof Error && error.message === "leg_finalized") {
+                  return new Promise<never>(() => undefined);
+                }
+                if (error instanceof Error && error.message === "wait_timeout") {
+                  return new Promise<never>(() => undefined);
+                }
+                throw error;
+              }),
+            ]);
+          }
+          if (outcome && outcome.eventType === DIAL_EVENT_INTERRUPTED) {
+            const liveDial = this.dialService.getDial(String(outcome.dialId || dialIds[0] || "").trim());
+            return {
+              ...outcome,
+              dialId: String(outcome.dialId || dialIds[0] || "").trim(),
+              stillDialingLegCount: Number(outcome.stillDialingLegCount || liveDial?.activeAttemptLegIds.length || 0),
+            };
+          }
+          return outcome;
         } finally {
+          dialWait.cancel();
+          interruptWait?.cancel();
           legRetention?.release();
           for (const ticket of dialRetentions) {
             ticket.release();
@@ -1073,7 +1131,7 @@ export class SipPbxDaemon {
             callerNumber: String(action.callerNumber || ""),
             callerName: String(action.callerName || ""),
             customSipHeaders: Array.isArray(action.customSipHeaders) ? action.customSipHeaders as Array<{ name: string; value: string }> : [],
-            extensionListOnlyFreeEndpoints: action.extensionListOnlyFreeEndpoints !== false,
+            extensionOnlyFreeEndpoints: action.extensionOnlyFreeEndpoints !== false,
             sequentialAttemptTimeoutSeconds: Math.max(0, Number(action.sequentialAttemptTimeoutSeconds || OPTION_DEFAULTS.dial.sequentialAttemptTimeoutSeconds)),
             sequentialGapSeconds: Math.max(0, Number(action.sequentialGapSeconds || OPTION_DEFAULTS.dial.sequentialGapSeconds)),
           },
@@ -1101,25 +1159,24 @@ export class SipPbxDaemon {
           legId: String(action.queueStatsTarget || OPTION_DEFAULTS.queueAction.statsTarget) === "legId" ? String(action.legId || "") : undefined,
         });
       case "media.playAudio":
-        return this.mediaService.playAudio(String(action.mediaLegId || action.legId || ""), action, context);
+        return this.mediaService.playAudio(String(action.legId || ""), action, context);
       case "media.playTone":
-        return this.mediaService.playTone(String(action.mediaLegId || action.legId || ""), action, context);
+        return this.mediaService.playTone(String(action.legId || ""), action, context);
       case "media.recordAudio":
-        return this.mediaService.recordAudio(String(action.mediaLegId || action.legId || ""), action, context);
+        return this.mediaService.recordAudio(String(action.legId || ""), action, context);
       case "media.stopMedia":
         return this.mediaService.stopMedia({
           stopMediaTarget: String(action.stopMediaTarget || OPTION_DEFAULTS.stopMedia.target),
-          stopMediaId: String(action.stopMediaId || ""),
-          stopMediaLegId: String(action.stopMediaLegId || action.legId || ""),
-          stopMediaReason: String(action.stopMediaReason || OPTION_DEFAULTS.stopMedia.reason),
+          stopMediaId: String(action.mediaId || ""),
+          stopMediaLegId: String(action.legId || ""),
         }, context);
       case "media.wait":
         return this.mediaService.waitMedia({
-          waitMediaIds: Array.isArray(action.waitMediaIds) ? action.waitMediaIds.map((value) => String(value || "")) : [],
+          waitMediaIds: Array.isArray(action.mediaIds) ? action.mediaIds.map((value) => String(value || "")) : [],
           waitMediaTimeoutMs: Math.max(0, Math.round(Number(action.waitMediaTimeoutSeconds || OPTION_DEFAULTS.waitMedia.timeoutSeconds) * 1000)),
         }, context);
       case "media.sendDtmf":
-        return this.mediaService.sendDtmf(String(action.mediaLegId || action.legId || ""), String(action.dtmfDigits || ""), action);
+        return this.mediaService.sendDtmf(String(action.legId || ""), String(action.dtmfDigits || ""), action);
       default:
         throw daemonError("unsupported_operation", `Unsupported action operation ${operation}`);
     }
@@ -1304,6 +1361,108 @@ export class SipPbxDaemon {
     }
   }
 
+  private waitForDialInterruptOnLeg(
+    legId: string,
+    includeDtmf: boolean,
+    timeoutMs: number,
+    context: RequestContext,
+  ): DialInterruptWait | null {
+    const leg = this.legService.getLeg(legId);
+    if (!leg) {
+      return null;
+    }
+    const dtmfMatches = (event: LegEvent): boolean => event.eventType === CALL_EVENT_DTMF;
+    const endedMatches = (event: LegEvent): boolean => event.eventType === CALL_EVENT_ENDED;
+    const matches = (event: LegEvent): boolean => (
+      endedMatches(event)
+      || (includeDtmf && dtmfMatches(event))
+    );
+    const toInterruptedEvent = (event: LegEvent) => {
+      if (event.eventType === CALL_EVENT_ENDED) {
+        return {
+          eventType: DIAL_EVENT_INTERRUPTED,
+          legId,
+          interruptReason: INTERRUPT_REASON_CALL_ENDED,
+          stillDialingLegCount: 0,
+        } as const;
+      }
+      const digits = String((event as Extract<LegEvent, { eventType: typeof CALL_EVENT_DTMF }>).digits || "").trim();
+      return {
+        eventType: DIAL_EVENT_INTERRUPTED,
+        legId,
+        interruptReason: INTERRUPT_REASON_CALL_DTMF,
+        digit: digits.slice(0, 1) || undefined,
+        digits: digits || undefined,
+        stillDialingLegCount: 0,
+      } as const;
+    };
+    const consumeIgnoredQueuedDtmf = () => {
+      if (includeDtmf) {
+        return;
+      }
+      leg.consumeQueuedEventsMatching(dtmfMatches);
+    };
+
+    consumeIgnoredQueuedDtmf();
+    const immediate = leg.peekQueuedEventMatching(matches);
+    if (immediate) {
+      return {
+        promise: Promise.resolve(toInterruptedEvent(immediate)),
+        cancel: () => undefined,
+      };
+    }
+
+    let release = () => undefined;
+    let activeTicket: { promise: Promise<LegEvent>; cancel: () => void } | null = null;
+    return {
+      promise: new Promise((resolve, reject) => {
+        release = context.onCancel(() => {
+          activeTicket?.cancel();
+          reject(daemonError("request_cancelled", "The request was cancelled"));
+        });
+        const deadlineAtMs = timeoutMs > 0 ? nowMs() + timeoutMs : Number.POSITIVE_INFINITY;
+        void (async () => {
+          try {
+            while (true) {
+              consumeIgnoredQueuedDtmf();
+              const queued = leg.peekQueuedEventMatching(matches);
+              if (queued) {
+                resolve(toInterruptedEvent(queued));
+                return;
+              }
+              const remainingWaitMs = Number.isFinite(deadlineAtMs)
+                ? Math.max(0, deadlineAtMs - nowMs())
+                : 0;
+              if (Number.isFinite(deadlineAtMs) && remainingWaitMs <= 0) {
+                reject(new Error("wait_timeout"));
+                return;
+              }
+              activeTicket = leg.waitForEventCancellable(
+                includeDtmf ? matches : (event) => endedMatches(event) || dtmfMatches(event),
+                remainingWaitMs,
+              );
+              const event = await activeTicket.promise;
+              activeTicket = null;
+              if (!includeDtmf && event.eventType === CALL_EVENT_DTMF) {
+                continue;
+              }
+              resolve(toInterruptedEvent(event));
+              return;
+            }
+          } catch (error) {
+            reject(error);
+          } finally {
+            release();
+          }
+        })();
+      }),
+      cancel: () => {
+        activeTicket?.cancel();
+        release();
+      },
+    };
+  }
+
   private async waitForVoiceAgentTermination(
     legId: string,
     context: RequestContext,
@@ -1338,7 +1497,7 @@ export class SipPbxDaemon {
         return {
           legId,
           eventType: MEDIA_EVENT_INTERRUPTED,
-          reason: "request_cancelled",
+          reason: INTERRUPT_REASON_REQUEST_CANCELLED,
         };
       }
       return {
@@ -1765,20 +1924,20 @@ export class SipPbxDaemon {
     if (!recordFilePath) {
       throw daemonError("invalid_request", "recordFilePath is required when global recording is active");
     }
-    const recordFileFormat = String(action.recordFileFormat || OPTION_DEFAULTS.recordAudio.fileFormat).trim().toLowerCase() || OPTION_DEFAULTS.recordAudio.fileFormat;
+    const recordFileFormat = String(action.recordFileFormat || OPTION_DEFAULTS.globalRecording.fileFormat).trim().toLowerCase() || OPTION_DEFAULTS.globalRecording.fileFormat;
     const recordInput: Record<string, unknown> = {
       mediaExecutionMode: "background",
       recordOutputType: "file",
       recordFilePath,
       recordFileFormat,
-      recordSplitChannels: Boolean(action.recordSplitChannels ?? OPTION_DEFAULTS.autoRecording.splitChannels),
+      recordSplitChannels: Boolean(action.recordSplitChannels ?? OPTION_DEFAULTS.globalRecording.splitChannels),
     };
     if (recordFileFormat === "wav") {
-      recordInput.recordWavSampleRate = Number(action.recordWavSampleRate || OPTION_DEFAULTS.recordAudio.wavSampleRate);
-      recordInput.recordWavBitDepth = Number(action.recordWavBitDepth || OPTION_DEFAULTS.recordAudio.wavBitDepth);
+      recordInput.recordWavSampleRate = Number(action.recordWavSampleRate || OPTION_DEFAULTS.globalRecording.wavSampleRate);
+      recordInput.recordWavBitDepth = Number(action.recordWavBitDepth || OPTION_DEFAULTS.globalRecording.wavBitDepth);
     } else {
-      recordInput.recordCompressedSampleRate = Number(action.recordCompressedSampleRate || OPTION_DEFAULTS.recordAudio.compressedSampleRate);
-      recordInput.recordCompressedBitrate = Number(action.recordCompressedBitrate || OPTION_DEFAULTS.recordAudio.compressedBitrateKbps);
+      recordInput.recordCompressedSampleRate = Number(action.recordCompressedSampleRate || OPTION_DEFAULTS.globalRecording.compressedSampleRate);
+      recordInput.recordCompressedBitrate = Number(action.recordCompressedBitrate || OPTION_DEFAULTS.globalRecording.compressedBitrateKbps);
     }
     return recordInput;
   }

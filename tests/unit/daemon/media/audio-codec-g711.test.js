@@ -7,24 +7,6 @@ const { createCodec } = require("../../../../build-src/daemon/media/codecs/audio
 
 const MULAW_BIAS = 0x84;
 const MULAW_CLIP = 32635;
-const MULAW_EXP_LUT = [
-  0, 1, 2, 2, 3, 3, 3, 3,
-  4, 4, 4, 4, 4, 4, 4, 4,
-  5, 5, 5, 5, 5, 5, 5, 5,
-  5, 5, 5, 5, 5, 5, 5, 5,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-];
 const ALAW_SEG_END = [
   0x1f,
   0x3f,
@@ -47,17 +29,22 @@ function searchSegment(value, table) {
 
 function encodeReferenceMulaw(sample) {
   let pcm = sample | 0;
-  const sign = (pcm >> 8) & 0x80;
-  if (sign) {
-    pcm = -pcm;
+  let mask = 0xff;
+  if (pcm < 0) {
+    pcm = MULAW_BIAS - pcm;
+    mask = 0x7f;
+  } else {
+    pcm = MULAW_BIAS + pcm;
   }
   if (pcm > MULAW_CLIP) {
     pcm = MULAW_CLIP;
   }
-  pcm += MULAW_BIAS;
-  const exponent = MULAW_EXP_LUT[(pcm >> 7) & 0xff];
+  let exponent = 0;
+  for (let value = pcm >> 7; value > 1; value >>= 1) {
+    exponent += 1;
+  }
   const mantissa = (pcm >> (exponent + 3)) & 0x0f;
-  return (~(sign | (exponent << 4) | mantissa)) & 0xff;
+  return ((exponent << 4) | mantissa) ^ mask;
 }
 
 function decodeReferenceMulaw(value) {
@@ -73,11 +60,11 @@ function decodeReferenceMulaw(value) {
 }
 
 function encodeReferenceAlaw(sample) {
-  let pcm = sample | 0;
+  let pcm = (sample | 0) >> 3;
   let mask = 0xd5;
   if (pcm < 0) {
     mask = 0x55;
-    pcm = -pcm - 8;
+    pcm = -pcm - 1;
     if (pcm < 0) {
       pcm = 0;
     }
@@ -87,8 +74,8 @@ function encodeReferenceAlaw(sample) {
     return (0x7f ^ mask) & 0xff;
   }
   const mantissa = exponent === 0
-    ? ((pcm >> 4) & 0x0f)
-    : ((pcm >> (exponent + 3)) & 0x0f);
+    ? ((pcm >> 1) & 0x0f)
+    : ((pcm >> exponent) & 0x0f);
   return (((exponent << 4) | mantissa) ^ mask) & 0xff;
 }
 
@@ -181,4 +168,35 @@ test("G.711 PCMA encode and decode match canonical A-law tables", async () => {
   }
 
   codec.close();
+});
+
+test("G.711 roundtrip preserves practical signal level without early saturation", async () => {
+  const codec = createCodec("g711");
+  try {
+    const sampleCount = 160;
+    const pcm = Buffer.allocUnsafe(sampleCount * 2);
+    for (let index = 0; index < sampleCount; index += 1) {
+      const value = Math.round(Math.sin((2 * Math.PI * 440 * index) / 8000) * 12000);
+      pcm.writeInt16LE(value, index * 2);
+    }
+
+    for (const codecName of ["pcma", "pcmu"]) {
+      const descriptor = codec.listDescriptors().find((entry) => entry.name === codecName);
+      assert.ok(descriptor, `${codecName} descriptor must exist`);
+      const encoded = Buffer.allocUnsafe(sampleCount);
+      const encodedBytes = codec.encodeRtpPayload(descriptor, pcm, 1, encoded);
+      assert.equal(encodedBytes, sampleCount);
+      const decoded = Buffer.allocUnsafe(sampleCount * 2);
+      const decodedBytes = codec.decodeRtpPayload(descriptor, descriptor.payloadType, encoded, decoded);
+      assert.equal(decodedBytes, sampleCount * 2);
+
+      let peak = 0;
+      for (let index = 0; index < sampleCount; index += 1) {
+        peak = Math.max(peak, Math.abs(decoded.readInt16LE(index * 2)));
+      }
+      assert.ok(peak >= 10000 && peak <= 14000, `${codecName} roundtrip peak out of expected range: ${peak}`);
+    }
+  } finally {
+    codec.close();
+  }
 });

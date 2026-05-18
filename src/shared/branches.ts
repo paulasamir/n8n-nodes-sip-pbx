@@ -116,6 +116,7 @@ export const MediaInfiniteToneBranches = [MediaInfiniteToneBranchInterrupted] as
 export const DialWaitBranchRinging = "Ringing" as const;
 export const DialWaitBranchProgress = "Progress" as const;
 export const DialWaitBranchAnswered = "Answered" as const;
+export const DialWaitBranchInterrupted = "Interrupted" as const;
 export const DialWaitBranchRejected = "Rejected" as const;
 export const DialWaitBranchFailed = "Failed" as const;
 export const DialWaitBranchTimeout = "Timeout" as const;
@@ -123,6 +124,7 @@ export type DialWaitBranch =
   | typeof DialWaitBranchRinging
   | typeof DialWaitBranchProgress
   | typeof DialWaitBranchAnswered
+  | typeof DialWaitBranchInterrupted
   | typeof DialWaitBranchRejected
   | typeof DialWaitBranchFailed
   | typeof DialWaitBranchTimeout;
@@ -137,6 +139,7 @@ export function buildDialWaitBranchOrder(input: {
   if (input.includeProgress) order.push(DialWaitBranchProgress);
   if (input.includeRejected) order.push(DialWaitBranchRejected);
   order.push(DialWaitBranchAnswered);
+  order.push(DialWaitBranchInterrupted);
   order.push(DialWaitBranchTimeout);
   order.push(DialWaitBranchFailed);
   return order;
@@ -144,10 +147,10 @@ export function buildDialWaitBranchOrder(input: {
 
 /**
  * The leading branches are dynamic — one per user-defined DTMF rule label.
- * The static tail in order: DTMF Fallback (optional), Interrupt, Timeout, Ended.
+ * The static tail in order: DTMF Fallback (optional), Interrupted, Timeout, Ended.
  */
 export const CallWaitBranchDtmfFallback = "DTMF Fallback" as const;
-export const CallWaitBranchInterrupt = "Interrupt" as const;
+export const CallWaitBranchInterrupt = "Interrupted" as const;
 export const CallWaitBranchEnded = "Ended" as const;
 export const CallWaitBranchTimeout = "Timeout" as const;
 export type CallWaitStaticBranch =
@@ -156,10 +159,13 @@ export type CallWaitStaticBranch =
   | typeof CallWaitBranchEnded
   | typeof CallWaitBranchTimeout;
 
-export function buildCallWaitStaticTail(includeDtmfFallback: boolean): readonly CallWaitStaticBranch[] {
+export function buildCallWaitStaticTail(
+  includeDtmfFallback: boolean,
+  includeInterrupt: boolean,
+): readonly CallWaitStaticBranch[] {
   const tail: CallWaitStaticBranch[] = [];
   if (includeDtmfFallback) tail.push(CallWaitBranchDtmfFallback);
-  tail.push(CallWaitBranchInterrupt);
+  if (includeInterrupt) tail.push(CallWaitBranchInterrupt);
   tail.push(CallWaitBranchTimeout);
   tail.push(CallWaitBranchEnded);
   return tail;

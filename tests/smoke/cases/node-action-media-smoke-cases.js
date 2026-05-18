@@ -5,6 +5,9 @@ const assert = require("assert");
 const http = require("http");
 const https = require("https");
 const {
+  SIP_DTMF_METHOD_RFC2833,
+} = require("../../../build-src/shared/sip-media-filters.js");
+const {
   sipPbxNodeModulePath,
   createExecuteContext,
   withPatchedRuntime,
@@ -19,7 +22,7 @@ async function testMediaPlayAudioAndTone() {
     },
     async playTone(legId, input) {
       seen.playTone = { legId, input };
-      return { legId, status: "interrupted", interruptReason: "dtmf", digit: "5" };
+      return { legId, status: "interrupted", interruptReason: "call_dtmf", digit: "5" };
     },
     async sendDtmf(legId, digits, input) {
       seen.sendDtmf = { legId, digits, input };
@@ -32,11 +35,10 @@ async function testMediaPlayAudioAndTone() {
     Object.assign(playAudioNode, createExecuteContext({
       resource: "media",
       operation: "media.playAudio",
-      mediaOptions: { legId: "leg-audio", mediaExecutionMode: "background", duckingFactor: 0.5, stopOtherMedia: true },
+      options: { legId: "leg-audio", mediaExecutionMode: "background", duckingFactor: 0.5, stopOtherMedia: true },
       sourceType: "binary",
       binaryProperty: "audio",
-      interruptOnDtmf: true,
-      interruptOnVoice: false,
+      interruptOn: [["dtmf"]],
     }, [{ json: {}, binary: { audio: { data: Buffer.from("AUDIO").toString("base64") } } }]));
     const playAudioOutputs = await playAudioNode.execute();
     assert.strictEqual(playAudioOutputs.length, 1);
@@ -47,35 +49,33 @@ async function testMediaPlayAudioAndTone() {
     Object.assign(playToneNode, createExecuteContext({
       resource: "media",
       operation: "media.playTone",
-      mediaOptions: { legId: "leg-tone", voiceThreshold: 0.02, voiceDurationMs: 150, duckingFactor: 0.4, mediaExecutionMode: "blocking" },
+      options: { legId: "leg-tone", voiceThreshold: 0.02, voiceDurationMs: 150, duckingFactor: 0.4, mediaExecutionMode: "blocking" },
       tone: "custom",
       customTone: "440+480/200,0/100",
       repeatInfinite: false,
-      interruptOnDtmf: true,
-      interruptOnVoice: false,
+      interruptOn: [["dtmf"]],
     }, [{ json: {} }]));
     const playToneOutputs = await playToneNode.execute();
-    assert.strictEqual(playToneOutputs[0][0].json.interruptReason, "dtmf");
+    assert.strictEqual(playToneOutputs[0][0].json.interruptReason, "call_dtmf");
 
     const infiniteToneNode = new SipPbx();
     Object.assign(infiniteToneNode, createExecuteContext({
       resource: "media",
       operation: "media.playTone",
-      mediaOptions: { legId: "leg-tone", voiceThreshold: 0.02, voiceDurationMs: 150, duckingFactor: 0.4, mediaExecutionMode: "blocking" },
+      options: { legId: "leg-tone", voiceThreshold: 0.02, voiceDurationMs: 150, duckingFactor: 0.4, mediaExecutionMode: "blocking" },
       tone: "ringback",
       repeatInfinite: true,
-      interruptOnDtmf: true,
-      interruptOnVoice: false,
+      interruptOn: [["dtmf"]],
     }, [{ json: {} }]));
     const infiniteToneOutputs = await infiniteToneNode.execute();
     assert.strictEqual(infiniteToneOutputs.length, 1);
-    assert.strictEqual(infiniteToneOutputs[0][0].json.interruptReason, "dtmf");
+    assert.strictEqual(infiniteToneOutputs[0][0].json.interruptReason, "call_dtmf");
 
     const sendDtmfNode = new SipPbx();
     Object.assign(sendDtmfNode, createExecuteContext({
       resource: "media",
       operation: "media.sendDtmf",
-      mediaOptions: { legId: "leg-dtmf", dtmfMethod: "rfc2833", dtmfDurationMs: 200, dtmfGapMs: 100 },
+      options: { legId: "leg-dtmf", dtmfMethod: SIP_DTMF_METHOD_RFC2833, dtmfDurationMs: 200, dtmfGapMs: 100 },
       dtmfDigits: "123",
     }, [{ json: {} }]));
     const sendDtmfOutputs = await sendDtmfNode.execute();
@@ -112,9 +112,8 @@ async function testMediaRecordAndWait() {
     Object.assign(recordNode, createExecuteContext({
       resource: "media",
       operation: "media.recordAudio",
-      mediaOptions: { legId: "leg-record-1", mediaExecutionMode: "background", silenceThreshold: 0.01, silenceDurationMs: 300, recordWavSampleRate: 8000, recordWavBitDepth: 16, stopOtherMedia: true },
-      interruptOnDtmf: true,
-      interruptOnSilence: true,
+      options: { legId: "leg-record-1", mediaExecutionMode: "background", silenceThreshold: 0.01, silenceDurationMs: 300, recordWavSampleRate: 8000, recordWavBitDepth: 16, stopOtherMedia: true },
+      interruptOn: [["dtmf", "silence"]],
       maxDurationSeconds: 30,
       recordFileFormat: "wav",
       recordOutputType: "binary",
@@ -127,7 +126,7 @@ async function testMediaRecordAndWait() {
     Object.assign(waitNode, createExecuteContext({
       resource: "media",
       operation: "media.wait",
-      waitMediaIds: { item: [{ mediaId: "media-record-1" }] },
+      mediaIds: { item: [{ mediaId: "media-record-1" }] },
       waitMediaTimeoutSeconds: 5,
     }, [{ json: {} }]));
     const waitOutputs = await waitNode.execute();
@@ -138,7 +137,7 @@ async function testMediaRecordAndWait() {
       resource: "media",
       operation: "media.stopMedia",
       stopMediaTarget: "mediaId",
-      mediaOptions: { mediaId: "media-record-1", stopMediaReason: "stop_media" },
+      options: { mediaId: "media-record-1" },
     }, [{ json: {} }]));
     const stopOutputs = await stopNode.execute();
     assert.strictEqual(stopOutputs[0][0].json.legId, "leg-record-1");
@@ -146,8 +145,8 @@ async function testMediaRecordAndWait() {
 
   assert.strictEqual(seen.recordAudio.input.recordFileFormat, "wav");
   assert.strictEqual(seen.recordAudio.input.stopOtherMedia, true);
-  assert.deepStrictEqual(seen.waitMedia.waitMediaIds, ["media-record-1"]);
-  assert.strictEqual(seen.stopMedia.stopMediaId, "media-record-1");
+  assert.deepStrictEqual(seen.waitMedia.mediaIds, ["media-record-1"]);
+  assert.strictEqual(seen.stopMedia.mediaId, "media-record-1");
   return { ok: true };
 }
 
@@ -186,7 +185,7 @@ async function testHttpAuthNormalization() {
     Object.assign(playAudioNode, createExecuteContext({
       resource: "media",
       operation: "media.playAudio",
-      mediaOptions: {
+      options: {
         legId: "leg-http-play",
         mediaExecutionMode: "background",
         playbackHttpHeaders: { item: [{ name: "X-Client", value: "playback" }] },
@@ -195,8 +194,7 @@ async function testHttpAuthNormalization() {
       playbackHttpUrl: "https://media.example.test/audio?existing=1",
       authentication: "predefinedCredentialType",
       nodeCredentialType: "predefinedApi",
-      interruptOnDtmf: false,
-      interruptOnVoice: false,
+      interruptOn: [[]],
     }, [{ json: {} }], {
       helpers: { httpRequestWithAuthentication: helper },
     }));
@@ -206,13 +204,12 @@ async function testHttpAuthNormalization() {
     Object.assign(recordNode, createExecuteContext({
       resource: "media",
       operation: "media.recordAudio",
-      mediaOptions: {
+      options: {
         legId: "leg-http-record",
         mediaExecutionMode: "background",
         recordHttpHeaders: { item: [{ name: "X-Client", value: "record" }] },
       },
-      interruptOnDtmf: false,
-      interruptOnSilence: false,
+      interruptOn: [[]],
       maxDurationSeconds: 30,
       recordFileFormat: "wav",
       recordOutputType: "http",

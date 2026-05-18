@@ -128,7 +128,7 @@ test("extension list dial targets only free endpoints by default and can include
     const allEndpoints = daemon.signalingService.makeDial({
       callMode: "extension",
       extensionNumbers: ["100"],
-      extensionListOnlyFreeEndpoints: false,
+      extensionOnlyFreeEndpoints: false,
       workflowScopeKey: "workflow:alpha",
     });
     assert.deepStrictEqual(daemon.dialRegistry.get(allEndpoints.dialId).targets, [

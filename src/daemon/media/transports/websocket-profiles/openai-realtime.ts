@@ -236,10 +236,10 @@ export function createOpenAiRealtimeWebSocketTransportProfile(config: Record<str
         }];
       }
       if (eventType === "input_audio_buffer.speech_started") {
-        return [{ type: "interrupt" as const, reason: "voice", eventType }];
+        return [{ type: "interrupt" as const, reason: "media_voice", eventType }];
       }
       if (eventType === "input_audio_buffer.speech_stopped") {
-        return [{ type: "interrupt" as const, reason: "silence", eventType }];
+        return [{ type: "interrupt" as const, reason: "media_silence", eventType }];
       }
       return [];
     },

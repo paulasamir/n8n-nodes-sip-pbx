@@ -10,6 +10,7 @@ import {
   CallWaitBranchInterrupt,
   CallWaitBranchTimeout,
   DialWaitBranchAnswered,
+  DialWaitBranchInterrupted,
   DialWaitBranchFailed,
   DialWaitBranchProgress,
   DialWaitBranchRejected,
@@ -31,6 +32,7 @@ import {
   CALL_WAIT_OUTPUT_INTERRUPT,
   CALL_WAIT_OUTPUT_MATCHED,
   DIAL_EVENT_ANSWERED,
+  DIAL_EVENT_INTERRUPTED,
   DIAL_EVENT_PROGRESS,
   DIAL_EVENT_REJECTED,
   DIAL_EVENT_RINGING,
@@ -46,11 +48,15 @@ import {
 import {
   assertUniqueRuleLabels,
   getInputItems,
+  hasInterruptSelection,
   normalizeDtmfRules,
   readBooleanParameter,
-  readCollectionOptions,
+  readCallInterruptReasons,
+  readInterruptSelections,
   readNodeParameter,
+  readOptions,
 } from "../shared/input-normalization";
+import { INTERRUPT_SELECTION_DTMF } from "../../shared/interrupt-selections";
 import {
   resolveAuthRequestId,
   resolveAiToolRequestId,
@@ -99,7 +105,7 @@ type OutputMatrix = any[][];
 type CallWaitPlan = {
   rules: Array<{ pattern: string; label: string }>;
   dtmfFallbackIndex: number | null;
-  interruptIndex: number;
+  interruptIndex: number | null;
   endedIndex: number;
   timeoutIndex: number;
   branchIndexByLabel: Map<string, number>;
@@ -108,9 +114,11 @@ type CallWaitPlan = {
 
 type DialWaitPlan = {
   selectedOutputs: string[];
+  interruptOnDtmf: boolean;
   ringingIndex: number | null;
   progressIndex: number | null;
   answeredIndex: number;
+  interruptedIndex: number | null;
   rejectedIndex: number | null;
   failedIndex: number;
   timeoutIndex: number;
@@ -253,17 +261,21 @@ function isExtensionNoAvailableEndpointsError(error: unknown): boolean {
 function createCallWaitPlan(node: any, index: number): CallWaitPlan {
   const rules = normalizeDtmfRules(node, index);
   assertUniqueRuleLabels(rules);
-  const dtmfFallbackEnabled = readBooleanParameter(node, "waitDtmfFallbackEnabled", index, false);
+  const dtmfFallbackEnabled = readBooleanParameter(node, "waitDtmfFallbackEnabled", index, OPTION_DEFAULTS.call.waitDtmfFallbackEnabled);
+  const interruptReasons = readCallInterruptReasons(node, "interruptReasons", index);
+  const includeInterrupt = interruptReasons.length > 0;
   const branchIndexByLabel = new Map<string, number>();
   for (let i = 0; i < rules.length; i += 1) {
     branchIndexByLabel.set(rules[i]!.label, i);
   }
-  const tail = buildCallWaitStaticTail(dtmfFallbackEnabled);
+  const tail = buildCallWaitStaticTail(dtmfFallbackEnabled, includeInterrupt);
   const tailOffset = rules.length;
   const dtmfFallbackIndex = dtmfFallbackEnabled
     ? tailOffset + requireBranchIndex(tail, CallWaitBranchDtmfFallback)
     : null;
-  const interruptIndex = tailOffset + requireBranchIndex(tail, CallWaitBranchInterrupt);
+  const interruptIndex = includeInterrupt
+    ? tailOffset + requireBranchIndex(tail, CallWaitBranchInterrupt)
+    : null;
   const endedIndex = tailOffset + requireBranchIndex(tail, CallWaitBranchEnded);
   const timeoutIndex = tailOffset + requireBranchIndex(tail, CallWaitBranchTimeout);
   return {
@@ -279,15 +291,21 @@ function createCallWaitPlan(node: any, index: number): CallWaitPlan {
 
 function createDialWaitPlan(node: any, index: number): DialWaitPlan {
   const selectedOutputs = normalizeWaitEventOutputs(node, index);
+  const interruptOnDtmf = hasInterruptSelection(
+    readInterruptSelections(node, "interruptOn", index, [INTERRUPT_SELECTION_DTMF]),
+    INTERRUPT_SELECTION_DTMF,
+  );
   const includeRinging = selectedOutputs.includes(DIAL_WAIT_SELECTION_RINGING);
   const includeProgress = selectedOutputs.includes(DIAL_WAIT_SELECTION_PROGRESS);
   const includeRejected = selectedOutputs.includes(DIAL_WAIT_SELECTION_REJECTED);
   const order = buildDialWaitBranchOrder({ includeRinging, includeProgress, includeRejected });
   return {
     selectedOutputs,
+    interruptOnDtmf,
     ringingIndex: includeRinging ? requireBranchIndex(order, DialWaitBranchRinging) : null,
     progressIndex: includeProgress ? requireBranchIndex(order, DialWaitBranchProgress) : null,
     answeredIndex: requireBranchIndex(order, DialWaitBranchAnswered),
+    interruptedIndex: requireBranchIndex(order, DialWaitBranchInterrupted),
     rejectedIndex: includeRejected ? requireBranchIndex(order, DialWaitBranchRejected) : null,
     failedIndex: requireBranchIndex(order, DialWaitBranchFailed),
     timeoutIndex: requireBranchIndex(order, DialWaitBranchTimeout),
@@ -296,12 +314,12 @@ function createDialWaitPlan(node: any, index: number): DialWaitPlan {
 }
 
 function createMediaPlan(node: any, index: number, operation: string): MediaPlan {
-  const mediaOptions = readCollectionOptions(node, "mediaOptions", index);
-  const mediaExecutionMode = String(mediaOptions.mediaExecutionMode || "").trim()
+  const options = readOptions(node, index);
+  const mediaExecutionMode = String(options.mediaExecutionMode || "").trim()
     || String(readNodeParameter(node, "mediaExecutionMode", index, OPTION_DEFAULTS.mediaExecution.mode) || "").trim()
     || OPTION_DEFAULTS.mediaExecution.mode;
   const background = mediaExecutionMode === "background";
-  const infiniteTone = operation === "media.playTone" && readBooleanParameter(node, "repeatInfinite", index, false);
+  const infiniteTone = operation === "media.playTone" && readBooleanParameter(node, "repeatInfinite", index, OPTION_DEFAULTS.playTone.repeatInfinite);
   if (operation === "media.wait") {
     return { operation, background: false, infiniteTone: false, branchCount: WaitMediaBranches.length };
   }
@@ -469,7 +487,7 @@ async function executeCallItem(context: ItemExecutionContext): Promise<NodeEmiss
         branchIndex = callWaitPlan.dtmfFallbackIndex ?? callWaitPlan.timeoutIndex;
       } else if (result.output === CALL_WAIT_OUTPUT_INTERRUPT) {
         payload = { legId: resultLegId, eventType: CALL_EVENT_INTERRUPT, reason: result.reason };
-        branchIndex = callWaitPlan.interruptIndex;
+        branchIndex = callWaitPlan.interruptIndex ?? callWaitPlan.timeoutIndex;
       } else if (result.output === CALL_WAIT_OUTPUT_ENDED) {
         payload = { legId: resultLegId, eventType: CALL_EVENT_ENDED, reason: result.reason };
         branchIndex = callWaitPlan.endedIndex;
@@ -571,6 +589,18 @@ async function executeDialItem(context: ItemExecutionContext): Promise<NodeEmiss
           payload.legId = legId;
         }
         branchIndex = dialWaitPlan.answeredIndex;
+      } else if (result.eventType === DIAL_EVENT_INTERRUPTED) {
+        if (legId) {
+          payload.legId = legId;
+        }
+        payload.interruptReason = resultString(result, "interruptReason");
+        if (resultDefined(result, "digit")) {
+          payload.digit = resultString(result, "digit");
+        }
+        if (resultDefined(result, "digits")) {
+          payload.digits = resultString(result, "digits");
+        }
+        branchIndex = dialWaitPlan.interruptedIndex ?? dialWaitPlan.failedIndex;
       } else if (result.eventType === DIAL_EVENT_REJECTED) {
         if (legId) {
           payload.legId = legId;
@@ -637,12 +667,12 @@ async function executeQueueItem(context: ItemExecutionContext): Promise<NodeEmis
   const { node, runtime, item, index, operation } = context;
   switch (operation) {
     case "queue.putLeg": {
-      const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "queueOptions"));
+      const legId = requireActionValue("legId", resolveLegId(node, item, index));
       const result = await executeEnqueueLeg(node, runtime, item, index);
       return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
     }
     case "queue.setCallback": {
-      const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "queueOptions"));
+      const legId = requireActionValue("legId", resolveLegId(node, item, index));
       const result = await executeSetQueueCallback(node, runtime, item, index);
       return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
     }
@@ -686,7 +716,7 @@ async function executeRecordingItem(context: ItemExecutionContext): Promise<Node
       return emit(0, buildOutputItem(item, { legId: result.legId || legId }, { legId: result.legId || legId }));
     }
     case "recording.start": {
-      const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "recordingOptions"));
+      const legId = requireActionValue("legId", resolveLegId(node, item, index));
       const result = await executeStartGlobalRecording(node, runtime, item, index);
       const payload = {
         ...(result || {}),

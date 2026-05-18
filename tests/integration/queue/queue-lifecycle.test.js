@@ -2,6 +2,10 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const {
+  INTERRUPT_REASON_CALL_QUEUE_PLACED,
+  INTERRUPT_REASON_CALL_QUEUE_REMOVED,
+} = require("../../../build-src/shared/interrupt-reasons.js");
 
 async function waitForCondition(predicate, timeoutMs, label) {
   const deadline = Date.now() + timeoutMs;
@@ -24,7 +28,7 @@ function createFakeSocket() {
   };
 }
 
-test("queue lifecycle tracks enqueued and callback legs", async () => {
+test("queue lifecycle keeps callback-enabled caller out of queue_removed until the leg actually ends", async () => {
   const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
   const daemon = new SipPbxDaemon(".unused-queue-lifecycle.sock");
 
@@ -44,17 +48,101 @@ test("queue lifecycle tracks enqueued and callback legs", async () => {
       legId: "queue-leg-1",
       direction: "inbound",
       transportType: "sip",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
     });
 
     daemon.queueService.enqueueLeg("support", leg.legId, "back");
     assert.equal(daemon.queueService.getQueueStats({ ref: "support" }).size, 1);
+    assert.equal(daemon.legService.getLeg(leg.legId).status, "queued");
+    assert.equal(leg.shiftEventMatching((event) => event.eventType === "interrupt")?.reason, INTERRUPT_REASON_CALL_QUEUE_PLACED);
 
-    daemon.queueService.setQueueCallback(leg.legId);
-    assert.equal(daemon.legService.getLeg(leg.legId).status, "callback");
+    daemon.queueService.setQueueCallback(leg.legId, true);
+    assert.equal(daemon.legService.getLeg(leg.legId).status, "queued");
 
     const removal = daemon.queueService.removeEntryForLeg(leg.legId);
-    assert.deepStrictEqual(removal, { legId: leg.legId, removed: true });
-    assert.equal(daemon.queueService.getQueueStats({ ref: "support" }).size, 0);
+    assert.deepStrictEqual(removal, { legId: leg.legId, removed: false });
+    assert.equal(daemon.queueService.getQueueStats({ ref: "support" }).size, 1);
+    assert.equal(leg.shiftEventMatching((event) => event.eventType === "interrupt"), null);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("queue lifecycle publishes queue_placed and queue_removed leg interrupts", async () => {
+  const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
+  const daemon = new SipPbxDaemon(".unused-queue-leg-events.sock");
+
+  try {
+    daemon.registerTriggerStream({
+      kind: "queue",
+      config: {
+        ref: "support",
+        queueExtensions: [],
+        queueRetryPauseSeconds: 0.01,
+      },
+      socket: createFakeSocket(),
+      write() {},
+    });
+
+    const leg = daemon.legService.createLeg({
+      legId: "queue-leg-events-1",
+      direction: "inbound",
+      transportType: "sip",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
+    });
+
+    daemon.queueService.enqueueLeg("support", leg.legId, "back");
+    const placed = leg.shiftEventMatching((event) => event.eventType === "interrupt");
+    assert.equal(placed?.reason, INTERRUPT_REASON_CALL_QUEUE_PLACED);
+
+    daemon.queueService.removeEntryForLeg(leg.legId);
+    const removed = leg.shiftEventMatching((event) => event.eventType === "interrupt");
+    assert.equal(removed?.reason, INTERRUPT_REASON_CALL_QUEUE_REMOVED);
+  } finally {
+    await daemon.stop();
+  }
+});
+
+test("queue cleanup on leg end does not emit queue_removed before ended", async () => {
+  const { SipPbxDaemon } = require("../../../build-src/daemon/sip-pbx-daemon.js");
+  const daemon = new SipPbxDaemon(".unused-queue-leg-end-events.sock");
+
+  try {
+    daemon.registerTriggerStream({
+      kind: "queue",
+      config: {
+        ref: "support",
+        queueExtensions: [],
+        queueRetryPauseSeconds: 0.01,
+      },
+      socket: createFakeSocket(),
+      write() {},
+    });
+
+    const leg = daemon.legService.createLeg({
+      legId: "queue-leg-events-2",
+      direction: "inbound",
+      transportType: "sip",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
+    });
+
+    daemon.queueService.enqueueLeg("support", leg.legId, "back");
+    leg.shiftEventMatching((event) => event.eventType === "interrupt");
+
+    daemon.legService.hangupLeg(leg.legId, "caller_hangup");
+    const firstAfterHangup = leg.shiftEvent();
+    assert.equal(firstAfterHangup?.eventType, "ended");
+    assert.equal(firstAfterHangup?.reason, "caller_hangup");
+    assert.equal(leg.shiftEventMatching((event) => event.eventType === "interrupt"), null);
   } finally {
     await daemon.stop();
   }
@@ -100,6 +188,10 @@ test("flow-scoped queue trigger resolves operator availability across all same-f
       legId: "queue-leg-flow-alpha",
       direction: "inbound",
       transportType: "sip",
+      triggerMetadata: {
+        ref: "trunk-alpha",
+        publicRef: "trunk-alpha",
+      },
     });
 
     daemon.queueService.enqueueLeg("flow:workflow%3Aalpha:queue:ru-support", leg.legId, "back");
@@ -156,6 +248,10 @@ test("queue retry never republishes Placed after the first enqueue placement", a
       direction: "inbound",
       transportType: "sip",
       status: "created",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
     });
     daemon.queueService.enqueueLeg("support", waitingLeg.legId, "back");
     await waitForCondition(() => published.some((frame) => frame.branch === "Placed"), 1000, "initial placed");
@@ -204,6 +300,10 @@ test("queue rejects duplicate enqueue for the same leg", async () => {
       direction: "inbound",
       transportType: "sip",
       status: "created",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
     });
 
     daemon.queueService.enqueueLeg("support", leg.legId, "back");
@@ -246,6 +346,10 @@ test("queue request timeout retries the entry instead of taking it", async () =>
       direction: "inbound",
       transportType: "sip",
       status: "created",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
     });
 
     daemon.queueService.enqueueLeg("support", waitingLeg.legId, "back");
@@ -288,6 +392,10 @@ test("queue retry cooldown is not bypassed by workflow refresh after failed queu
       direction: "inbound",
       transportType: "sip",
       status: "created",
+      triggerMetadata: {
+        ref: "trunk-support",
+        publicRef: "trunk-support",
+      },
     });
 
     daemon.queueService.enqueueLeg("support", waitingLeg.legId, "back");

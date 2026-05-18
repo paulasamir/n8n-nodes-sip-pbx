@@ -1,5 +1,6 @@
 import { daemonError } from "../core/daemon-error";
-import type { RequestContext } from "../core/request-context";
+import type { CancellableWait } from "../core/event-waiter-set";
+import { RequestContext } from "../core/request-context";
 import { nowMs } from "../core/time";
 import { MapRegistry } from "../../shared/map-registry";
 import {
@@ -50,8 +51,6 @@ export class DialWaitService {
     );
     const waitTickets = waitRecords.map(({ record }) => record.retain("dial-wait"));
     try {
-      console.error(`[sip-pbx:dial-wait] begin; dialIds=${dialIds.join(",")}; timeoutMs=${timeoutMsValue(input)}; waitOutputs=${Array.from(enabledOutputNames(input)).join(",") || "none"}`);
-
       const timeoutMs = timeoutMsValue(input);
       const enabledOutputs = new Set<DialWaitSelection>(
         Array.isArray(typeof input === "number" ? [] : input.waitEventOutputs)
@@ -69,7 +68,6 @@ export class DialWaitService {
       for (const { dialId: currentDialId, record } of waitRecords) {
         const existing = record.shiftEventMatching(matches);
         if (existing) {
-          console.error(`[sip-pbx:dial-wait] immediate queued hit; dial=${currentDialId}; event=${existing.eventType}; reason=${String(existing.reason || "") || "none"}`);
           return {
             dialId: currentDialId,
             ...existing,
@@ -81,7 +79,6 @@ export class DialWaitService {
         if (!matches(snapshot)) {
           continue;
         }
-        console.error(`[sip-pbx:dial-wait] terminal snapshot hit; dial=${currentDialId}; event=${snapshot.eventType}; reason=${String(snapshot.reason || "") || "none"}`);
         return {
           dialId: currentDialId,
           ...snapshot,
@@ -97,10 +94,10 @@ export class DialWaitService {
       for (const { dialId: currentDialId, record, ticket } of tickets) {
         const queued = record.shiftEventMatching(matches);
         if (queued) {
+          ticket.cancel();
           for (const { ticket: currentTicket } of tickets) {
             currentTicket.cancel();
           }
-          console.error(`[sip-pbx:dial-wait] post-register queued hit; dial=${currentDialId}; event=${queued.eventType}; reason=${String(queued.reason || "") || "none"}`);
           return {
             dialId: currentDialId,
             ...queued,
@@ -108,6 +105,7 @@ export class DialWaitService {
           };
         }
       }
+
       try {
         const outcome = await this.waitForAnyWithCancellation(
           tickets.map(async ({ dialId: currentDialId, record, ticket }) => ({
@@ -122,7 +120,6 @@ export class DialWaitService {
             ticket.cancel();
           }
         }
-        console.error(`[sip-pbx:dial-wait] waiter resolved; dial=${outcome.dialId}; event=${outcome.event.eventType}; reason=${String(outcome.event.reason || "") || "none"}; stillDialing=${stillDialingCount(outcome.record)}`);
         return {
           dialId: outcome.dialId,
           ...outcome.event,
@@ -136,9 +133,6 @@ export class DialWaitService {
           throw error;
         }
         if (this.isWaitTimeout(error)) {
-          console.error(
-            `[sip-pbx:dial-wait] timeout; dialIds=${dialIds.join(",")}; stillDialing=${stillDialingCount(waitRecords[0]?.record || null)}; finalized=${Boolean(waitRecords[0]?.record.finalizedAt)}`,
-          );
           return {
             dialId: dialIds[0] || "",
             eventType: DIAL_EVENT_TIMEOUT,
@@ -153,6 +147,32 @@ export class DialWaitService {
         ticket.release();
       }
     }
+  }
+
+  waitForEventCancellable(
+    dialId: string | string[],
+    input: number | { timeoutMs: number; waitEventOutputs?: string[] },
+    context?: RequestContext | null,
+  ): CancellableWait<DialEvent & { dialId: string; stillDialingLegCount: number }> {
+    const localContext = new RequestContext();
+    let releaseParentCancel = () => undefined;
+    if (context) {
+      releaseParentCancel = context.onCancel(() => {
+        localContext.cancel();
+      });
+    }
+    const promise = this.waitForEvent(dialId, input, localContext)
+      .finally(() => {
+        releaseParentCancel();
+      });
+    return {
+      promise,
+      cancel: () => {
+        releaseParentCancel();
+        releaseParentCancel = () => undefined;
+        localContext.cancel();
+      },
+    };
   }
 
   private async waitForAnyWithCancellation<T>(
@@ -196,11 +216,4 @@ function stillDialingCount(dial: { activeAttemptLegIds: string[]; status?: strin
 
 function timeoutMsValue(input: number | { timeoutMs: number; waitEventOutputs?: string[] }): number {
   return typeof input === "number" ? input : Number(input.timeoutMs || 0);
-}
-
-function enabledOutputNames(input: number | { timeoutMs: number; waitEventOutputs?: string[] }): DialWaitSelection[] {
-  return Array.isArray(typeof input === "number" ? [] : input.waitEventOutputs)
-    ? ((typeof input === "number" ? [] : input.waitEventOutputs) as string[])
-      .filter((value): value is DialWaitSelection => (DIAL_WAIT_SELECTIONS as readonly string[]).includes(String(value || "")))
-    : [];
 }

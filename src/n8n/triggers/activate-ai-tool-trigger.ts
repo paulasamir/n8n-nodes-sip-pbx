@@ -1,15 +1,15 @@
 import type { PbxRuntime } from "../../runtime/pbx-runtime";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { AiToolTriggerBranches, AiToolTriggerBranchRequest, buildEmptyOutputs, requireBranchIndex } from "../../shared/branches";
-import { readCollectionOptions, readStringParameter } from "../shared/input-normalization";
+import { readOptions, readStringParameter } from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem } from "../shared/output-builders";
 
 export async function activateAiToolTrigger(node: any, runtime: PbxRuntime): Promise<any> {
-  const ref = readStringParameter(node, "ref", 0, "");
+  const ref = readStringParameter(node, "ref", 0, OPTION_DEFAULTS.common.string);
   if (!ref) {
     throw new Error("Trigger ref is required");
   }
-  const options = readCollectionOptions(node, "aiToolOptions", 0);
+  const options = readOptions(node, 0);
   await runtime.openAiToolTrigger(
     {
       ref,

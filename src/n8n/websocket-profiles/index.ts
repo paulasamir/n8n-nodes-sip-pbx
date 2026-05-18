@@ -40,7 +40,7 @@ export function buildWebSocketDialTransportProfileProperty(show: Record<string, 
     displayName: "Transport Profile",
     name: "transportProfile",
     type: "options",
-    default: "",
+    default: OPTION_DEFAULTS.common.string,
     required: true,
     displayOptions: { show },
     options: WEBSOCKET_DIAL_PROFILE_REGISTRY.map((profile) => profile.profileOption),
@@ -67,7 +67,7 @@ export function buildWebSocketDialProfileCredentials(show: Record<string, unknow
 }
 
 export async function applyWebSocketDialProfileInput(node: NodeParameterReader, index: number, input: Record<string, unknown>): Promise<void> {
-  const transportProfile = readStringParameter(node, "transportProfile", index, "");
+  const transportProfile = readStringParameter(node, "transportProfile", index, OPTION_DEFAULTS.common.string);
   input.transportProfile = transportProfile;
   const profile = WEBSOCKET_DIAL_PROFILE_REGISTRY.find((entry) => entry.profileId === transportProfile);
   if (!profile) {

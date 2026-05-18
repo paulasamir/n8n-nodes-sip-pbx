@@ -57,7 +57,7 @@ export class OutboundCallService {
       if (extensionNumbers.length === 0) {
         throw daemonError("invalid_dial_targets", "Extension dial requires extension numbers");
       }
-      const onlyFreeEndpoints = action.extensionListOnlyFreeEndpoints !== false;
+      const onlyFreeEndpoints = action.extensionOnlyFreeEndpoints !== false;
       const resolved = this.resolveExtensionTargets(extensionNumbers, String(action.workflowScopeKey || "").trim(), onlyFreeEndpoints);
       if (resolved.length === 0) {
         throw daemonError("invalid_dial_targets", "Extension dial requires active registrations");
@@ -141,6 +141,18 @@ export class OutboundCallService {
     }
     if (action.sipCredentials && typeof action.sipCredentials === "object") {
       metadata.sipCredentials = { ...(action.sipCredentials as Record<string, unknown>) };
+    }
+    if (Array.isArray(action.codecs)) {
+      metadata.codecs = (action.codecs as unknown[]).map((value) => String(value || "").trim()).filter(Boolean);
+    }
+    if (Array.isArray(action.dtmfMethods)) {
+      metadata.dtmfMethods = (action.dtmfMethods as unknown[]).map((value) => String(value || "").trim()).filter(Boolean);
+    }
+    if (!Array.isArray(metadata.codecs) || metadata.codecs.length === 0) {
+      metadata.codecs = [...OPTION_DEFAULTS.sipMedia.codecs];
+    }
+    if (!Array.isArray(metadata.dtmfMethods) || metadata.dtmfMethods.length === 0) {
+      metadata.dtmfMethods = [...OPTION_DEFAULTS.sipMedia.dtmfMethods];
     }
     return metadata;
   }

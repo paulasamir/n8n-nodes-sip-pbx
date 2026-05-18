@@ -4,6 +4,15 @@
 const assert = require("assert");
 const { OPTION_DEFAULTS } = require("../../../build-src/shared/option-defaults.js");
 const {
+  SIP_AUDIO_CODEC_ALAW,
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_MULAW,
+  SIP_AUDIO_CODEC_OPUS,
+  SIP_DTMF_METHOD_INBAND,
+  SIP_DTMF_METHOD_INFO,
+  SIP_DTMF_METHOD_RFC2833,
+} = require("../../../build-src/shared/sip-media-filters.js");
+const {
   sipPbxTriggerModulePath,
   createTriggerContext,
   withPatchedRuntime,
@@ -103,7 +112,9 @@ async function testTrunkTriggerNode() {
       trunkConnectionMode: "fixed",
       trunkUseRegistration: true,
       enableCallRecording: true,
-      trunkOptions: {
+      options: {
+        codecs: [SIP_AUDIO_CODEC_G722, SIP_AUDIO_CODEC_OPUS],
+        dtmfMethods: [SIP_DTMF_METHOD_INFO],
         registrationExpires: 900,
         registerHeaders: { item: [{ name: "X-Test", value: "1" }] },
         recordResponseTimeoutSeconds: 2.5,
@@ -132,6 +143,8 @@ async function testTrunkTriggerNode() {
   assert.strictEqual(seen.config.trunkConnectionMode, "fixed");
   assert.strictEqual(seen.config.trunkUseRegistration, true);
   assert.strictEqual(seen.config.enableCallRecording, true);
+  assert.deepStrictEqual(seen.config.codecs, [SIP_AUDIO_CODEC_G722, SIP_AUDIO_CODEC_OPUS]);
+  assert.deepStrictEqual(seen.config.dtmfMethods, [SIP_DTMF_METHOD_INFO]);
   assert.strictEqual(seen.config.recordResponseTimeoutSeconds, 2.5);
   assert.strictEqual(seen.config.recordingFilePathTemplate, undefined);
   assert.strictEqual(seen.config.recordingSplitChannels, undefined);
@@ -210,7 +223,9 @@ async function testTrunkAuthTriggerNode() {
       ref: "carrier-auth",
       trunkConnectionMode: "dynamic",
       authMode: "raw",
-      trunkOptions: {
+      options: {
+        codecs: [SIP_AUDIO_CODEC_ALAW, SIP_AUDIO_CODEC_MULAW],
+        dtmfMethods: [SIP_DTMF_METHOD_RFC2833, SIP_DTMF_METHOD_INFO],
         authTimeoutSeconds: 7.5,
         continueTraversalOnAuthReject: true,
         transport: "udp",
@@ -235,6 +250,8 @@ async function testTrunkAuthTriggerNode() {
   assert.strictEqual(seen.config.authTimeoutSeconds, 7.5);
   assert.strictEqual(seen.config.continueTraversalOnAuthReject, true);
   assert.strictEqual(seen.config.realm, "carrier.local");
+  assert.deepStrictEqual(seen.config.codecs, [SIP_AUDIO_CODEC_ALAW, SIP_AUDIO_CODEC_MULAW]);
+  assert.deepStrictEqual(seen.config.dtmfMethods, [SIP_DTMF_METHOD_RFC2833, SIP_DTMF_METHOD_INFO]);
   assert.strictEqual("sipCredentials" in seen.config, false);
   assert.strictEqual(stream.closed, true);
   assert.strictEqual(emitted.length, 1);
@@ -269,7 +286,7 @@ async function testTrunkAuthTriggerNodeDefaultsBindPort() {
       ref: "carrier-auth-no-port",
       trunkConnectionMode: "dynamic",
       authMode: "raw",
-      trunkOptions: {
+      options: {
         realm: "carrier.local",
       },
     }, {
@@ -311,7 +328,7 @@ async function testTrunkStaticAuthTriggerNode() {
       authMode: "static",
       trunkStaticUsername: "n8n-trunk",
       trunkStaticPassword: "Passw0rd",
-      trunkOptions: {
+      options: {
         realm: "carrier.local",
       },
     }, {
@@ -413,7 +430,9 @@ async function testExtensionsTriggerNode() {
       authMode: "raw",
       staticCredentials: { item: [{ username: "100", password: "secret", extension: "100" }] },
       extensionsEnableCallRecording: true,
-      extensionsOptions: {
+      options: {
+        codecs: [SIP_AUDIO_CODEC_OPUS],
+        dtmfMethods: [SIP_DTMF_METHOD_RFC2833, SIP_DTMF_METHOD_INBAND],
         authTimeoutSeconds: 3.5,
         recordResponseTimeoutSeconds: 4.5,
         transports: ["udp"],
@@ -437,6 +456,8 @@ async function testExtensionsTriggerNode() {
   assert.strictEqual(seen.config.authTimeoutSeconds, 3.5);
   assert.strictEqual(seen.config.recordResponseTimeoutSeconds, 4.5);
   assert.strictEqual(seen.config.extensionsEnableCallRecording, true);
+  assert.deepStrictEqual(seen.config.codecs, [SIP_AUDIO_CODEC_OPUS]);
+  assert.deepStrictEqual(seen.config.dtmfMethods, [SIP_DTMF_METHOD_RFC2833, SIP_DTMF_METHOD_INBAND]);
   assert.strictEqual(stream.closed, true);
   assert.strictEqual(emitted.length, 3);
   assert.strictEqual(emitted[0][0][0].json.sipPbx.legId, "leg-ext-1");
@@ -535,7 +556,7 @@ async function testQueueTriggerNode() {
       triggerOn: "queue",
       ref: "support",
       queueExtensions: "100, 101,102",
-      queueOptions: {
+      options: {
         queueRetryPauseSeconds: 3.5,
       },
     }, {
@@ -617,7 +638,7 @@ async function testAiTriggerNode() {
     Object.assign(node, createTriggerContext({
       triggerOn: "aiTool",
       ref: "assistant_tools",
-      aiToolOptions: {
+      options: {
         aiToolResponseTimeoutSeconds: 7,
       },
     }, {
@@ -661,7 +682,7 @@ async function testTriggerActivationRollback() {
       triggerOn: "extensions",
       ref: "sales",
       authMode: "raw",
-      extensionsOptions: {
+      options: {
         transports: ["udp"],
       },
     }, {
@@ -683,6 +704,7 @@ async function testTriggerPropertyContract() {
   await withPatchedRuntime({}, sipPbxTriggerModulePath, async ({ SipPbxTrigger }) => {
     const node = new SipPbxTrigger();
     const properties = node.description.properties;
+    const topLevelNames = new Set(properties.map((property) => property.name));
     const assertNoNestedDisplayOptions = (property) => {
       if (property.type === "collection" && Array.isArray(property.options)) {
         for (const option of property.options) {
@@ -726,28 +748,32 @@ async function testTriggerPropertyContract() {
     assert.strictEqual(trunkStaticUsernameProperty.required, true);
     assert.strictEqual(trunkStaticPasswordProperty.required, true);
 
-    const aiToolOptionsProperty = properties.find((property) => property.name === "aiToolOptions");
-    assert.ok(aiToolOptionsProperty, "missing aiToolOptions property");
+    const aiToolOptionsProperty = properties.find((property) =>
+      property.name === "options"
+      && property.displayOptions?.show?.triggerOn?.includes("aiTool"));
+    assert.ok(aiToolOptionsProperty, "missing trigger options property");
     assert.strictEqual(aiToolOptionsProperty.type, "collection");
     assert.ok(
       aiToolOptionsProperty.options.some((option) => option.name === "aiToolResponseTimeoutSeconds" && option.description),
-      "aiToolOptions should describe aiToolResponseTimeoutSeconds fallback",
+      "ai tool options should describe aiToolResponseTimeoutSeconds fallback",
     );
 
-    const trunkOptionsProperties = properties.filter((property) => property.name === "trunkOptions");
-    assert.ok(trunkOptionsProperties.length >= 1, "missing trunkOptions property");
+    const trunkOptionsProperties = properties.filter((property) =>
+      property.name === "options"
+      && property.displayOptions?.show?.triggerOn?.includes("trunk"));
+    assert.ok(trunkOptionsProperties.length >= 1, "missing trigger options property");
     assert.ok(trunkOptionsProperties.every((property) => property.type === "collection"));
     assert.ok(
       trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "registrationExpires")),
-      "trunkOptions should expose registrationExpires",
+      "trunk options should expose registrationExpires",
     );
     assert.ok(
       trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "registerHeaders")),
-      "trunkOptions should expose registerHeaders",
+      "trunk options should expose registerHeaders",
     );
     assert.ok(
       trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "recordResponseTimeoutSeconds")),
-      "trunkOptions should expose recordResponseTimeoutSeconds",
+      "trunk options should expose recordResponseTimeoutSeconds",
     );
     assert.ok(
       trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "recordResponseTimeoutSeconds" && option.description)),
@@ -761,27 +787,33 @@ async function testTriggerPropertyContract() {
       property.displayOptions?.show?.trunkConnectionMode?.[0] === "dynamic"
       && property.options.some((option) => option.name === "authTimeoutSeconds"),
     );
-    assert.ok(dynamicAuthTimeoutProperty, "missing dynamic trunkOptions variant");
+    assert.ok(dynamicAuthTimeoutProperty, "missing dynamic trunk options variant");
     assert.strictEqual(
       Object.prototype.hasOwnProperty.call(dynamicAuthTimeoutProperty.displayOptions.show, "trunkUseRegistration"),
       false,
-      "dynamic trunkOptions must not depend on trunkUseRegistration",
+      "dynamic trunk options must not depend on trunkUseRegistration",
     );
     assert.ok(
       !trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "authorizationUsernamePrefix")),
-      "dynamic trunkOptions must not expose authorizationUsernamePrefix",
+      "dynamic trunk options must not expose authorizationUsernamePrefix",
     );
+    assert.ok(!properties.some((property) => property.name === "codecs"));
+    assert.ok(!properties.some((property) => property.name === "dtmfMethods"));
+    assert.ok(trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "codecs")));
+    assert.ok(trunkOptionsProperties.some((property) => property.options.some((option) => option.name === "dtmfMethods")));
 
-    const extensionsOptionsProperties = properties.filter((property) => property.name === "extensionsOptions");
-    assert.ok(extensionsOptionsProperties.length >= 1, "missing extensionsOptions property");
+    const extensionsOptionsProperties = properties.filter((property) =>
+      property.name === "options"
+      && property.displayOptions?.show?.triggerOn?.includes("extensions"));
+    assert.ok(extensionsOptionsProperties.length >= 1, "missing trigger options property");
     assert.ok(extensionsOptionsProperties.every((property) => property.type === "collection"));
     assert.ok(
       extensionsOptionsProperties.some((property) => property.options.some((option) => option.name === "authTimeoutSeconds")),
-      "extensionsOptions should expose authTimeoutSeconds",
+      "extensions options should expose authTimeoutSeconds",
     );
     assert.ok(
       extensionsOptionsProperties.some((property) => property.options.some((option) => option.name === "recordResponseTimeoutSeconds")),
-      "extensionsOptions should expose recordResponseTimeoutSeconds",
+      "extensions options should expose recordResponseTimeoutSeconds",
     );
     assert.ok(
       extensionsOptionsProperties.some((property) => property.options.some((option) => option.name === "authTimeoutSeconds" && option.description)),
@@ -791,18 +823,18 @@ async function testTriggerPropertyContract() {
       extensionsOptionsProperties.some((property) => property.options.some((option) => option.name === "recordResponseTimeoutSeconds" && option.description)),
       "extensions recordResponseTimeoutSeconds should describe fallback",
     );
+    assert.ok(extensionsOptionsProperties.some((property) => property.options.some((option) => option.name === "codecs")));
+    assert.ok(extensionsOptionsProperties.some((property) => property.options.some((option) => option.name === "dtmfMethods")));
     assert.ok(!properties.some((property) => property.name === "extensionsAdvancedOptions"));
     assert.ok(!properties.some((property) => property.name === "registrationExpires"));
 
-    const queueOptionsProperty = properties.find((property) => property.name === "queueOptions");
-    assert.ok(queueOptionsProperty, "missing queueOptions property");
-    assert.strictEqual(queueOptionsProperty.type, "collection");
     const queueExtensionsProperty = properties.find((property) => property.name === "queueExtensions");
     assert.ok(queueExtensionsProperty, "missing queueExtensions property");
     assert.strictEqual(queueExtensionsProperty.required, true);
-    assert.ok(queueOptionsProperty.options.some((option) => option.name === "queueRetryPauseSeconds" && option.description));
-    assert.ok(!queueOptionsProperty.options.some((option) => option.name === "queueResponseTimeoutSeconds"));
-    assert.ok(!queueOptionsProperty.options.some((option) => option.name === "queueNoOperatorsGraceSeconds"));
+    const queueOptionsProperty = properties.find((property) =>
+      property.name === "options"
+      && property.displayOptions?.show?.triggerOn?.includes("queue"));
+    assert.strictEqual(queueOptionsProperty, undefined);
 
     assert.ok(!properties.some((property) => property.name === "aiToolResponseTimeoutSeconds"));
     assert.ok(!properties.some((property) => property.name === "authTimeoutSeconds"));
@@ -810,6 +842,18 @@ async function testTriggerPropertyContract() {
     assert.ok(!properties.some((property) => property.displayName === "Advanced Options"));
 
     for (const property of properties) {
+      const displayOptions = property.displayOptions || {};
+      for (const dependencySet of [displayOptions.show, displayOptions.hide]) {
+        if (!dependencySet) {
+          continue;
+        }
+        for (const dependencyName of Object.keys(dependencySet)) {
+          assert.ok(
+            topLevelNames.has(dependencyName),
+            `top-level property ${property.name} must not depend on missing parameter ${dependencyName}`,
+          );
+        }
+      }
       assertNoNestedDisplayOptions(property);
     }
   });

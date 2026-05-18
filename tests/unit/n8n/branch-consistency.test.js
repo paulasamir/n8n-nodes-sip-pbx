@@ -126,7 +126,7 @@ test("media.wait declares Interrupted/Timeout/Completed", () => {
 test("media play/record blocking declares 2 branches", () => {
   for (const op of ["media.playAudio", "media.playTone", "media.recordAudio"]) {
     assert.strictEqual(
-      uiOutputCount(op, { mediaOptions: { mediaExecutionMode: "blocking" } }),
+      uiOutputCount(op, { options: { mediaExecutionMode: "blocking" } }),
       2,
       `${op} blocking should declare 2 outputs`,
     );
@@ -136,7 +136,7 @@ test("media play/record blocking declares 2 branches", () => {
 test("media play/record background declares 1 branch", () => {
   for (const op of ["media.playAudio", "media.playTone", "media.recordAudio"]) {
     assert.strictEqual(
-      uiOutputCount(op, { mediaOptions: { mediaExecutionMode: "background" } }),
+      uiOutputCount(op, { options: { mediaExecutionMode: "background" } }),
       1,
       `${op} background should declare 1 output`,
     );
@@ -145,7 +145,7 @@ test("media play/record background declares 1 branch", () => {
 
 test("media.playTone with repeatInfinite declares 1 branch (Interrupted)", () => {
   assert.strictEqual(
-    uiOutputCount("media.playTone", { mediaOptions: {}, repeatInfinite: true }),
+    uiOutputCount("media.playTone", { options: {}, repeatInfinite: true }),
     1,
   );
 });
@@ -158,7 +158,11 @@ test("dial.wait output count matches the runtime plan for every selectedOutput c
         if (includeRinging) selected.push("ringing");
         if (includeProgress) selected.push("progress");
         if (includeRejected) selected.push("rejected");
-        const ui = uiOutputCount("dial.wait", { waitEventOutputs: selected });
+        const ui = uiOutputCount("dial.wait", {
+          waitEventOutputs: selected,
+          legId: "",
+          interruptOn: [],
+        });
         const plan = branches.buildDialWaitBranchOrder({ includeRinging, includeProgress, includeRejected }).length;
         assert.strictEqual(ui, plan, `dial selected=${selected.join(",")}: ui=${ui} plan=${plan}`);
       }
@@ -169,11 +173,11 @@ test("dial.wait output count matches the runtime plan for every selectedOutput c
 test("dial.wait branch order keeps Timeout before Failed and Rejected before Answered", () => {
   assert.deepStrictEqual(
     branches.buildDialWaitBranchOrder({ includeRinging: false, includeProgress: false, includeRejected: false }),
-    ["Answered", "Timeout", "Failed"],
+    ["Answered", "Interrupted", "Timeout", "Failed"],
   );
   assert.deepStrictEqual(
     branches.buildDialWaitBranchOrder({ includeRinging: true, includeProgress: true, includeRejected: true }),
-    ["Ringing", "Progress", "Rejected", "Answered", "Timeout", "Failed"],
+    ["Ringing", "Progress", "Rejected", "Answered", "Interrupted", "Timeout", "Failed"],
   );
 });
 
@@ -185,22 +189,40 @@ test("call.wait output count = rules + static tail", () => {
     { rules: { item: [{ pattern: "1", label: "" }] }, expectedRuleCount: 0 }, // empty label is filtered
   ];
   for (const withFallback of [false, true]) {
-    const tailSize = branches.buildCallWaitStaticTail(withFallback).length;
-    for (const { rules, expectedRuleCount } of rulesShape) {
-      const ui = uiOutputCount("call.wait", { rules, waitDtmfFallbackEnabled: withFallback });
-      assert.strictEqual(ui, expectedRuleCount + tailSize, `fallback=${withFallback} rules=${expectedRuleCount}: got ${ui}`);
+    for (const withInterrupt of [false, true]) {
+      const tailSize = branches.buildCallWaitStaticTail(withFallback, withInterrupt).length;
+      for (const { rules, expectedRuleCount } of rulesShape) {
+        const ui = uiOutputCount("call.wait", {
+          rules,
+          waitDtmfFallbackEnabled: withFallback,
+          options: { interruptReasons: withInterrupt ? ["call_bridge_joined"] : [] },
+        });
+        assert.strictEqual(
+          ui,
+          expectedRuleCount + tailSize,
+          `fallback=${withFallback} interrupt=${withInterrupt} rules=${expectedRuleCount}: got ${ui}`,
+        );
+      }
     }
   }
 });
 
 test("call.wait static tail order keeps Ended last", () => {
   assert.deepStrictEqual(
-    branches.buildCallWaitStaticTail(false),
-    ["Interrupt", "Timeout", "Ended"],
+    branches.buildCallWaitStaticTail(false, false),
+    ["Timeout", "Ended"],
   );
   assert.deepStrictEqual(
-    branches.buildCallWaitStaticTail(true),
-    ["DTMF Fallback", "Interrupt", "Timeout", "Ended"],
+    branches.buildCallWaitStaticTail(false, true),
+    ["Interrupted", "Timeout", "Ended"],
+  );
+  assert.deepStrictEqual(
+    branches.buildCallWaitStaticTail(true, false),
+    ["DTMF Fallback", "Timeout", "Ended"],
+  );
+  assert.deepStrictEqual(
+    branches.buildCallWaitStaticTail(true, true),
+    ["DTMF Fallback", "Interrupted", "Timeout", "Ended"],
   );
 });
 
@@ -218,7 +240,7 @@ test("buildEmptyOutputs has one [] slot per branch", () => {
     branches.buildTrunkTriggerBranchOrder(true, true),
     branches.buildExtensionsTriggerBranchOrder(true, true),
     branches.buildDialWaitBranchOrder({ includeRinging: true, includeProgress: true, includeRejected: true }),
-    branches.buildCallWaitStaticTail(true),
+    branches.buildCallWaitStaticTail(true, true),
   ]) {
     const outputs = branches.buildEmptyOutputs(order);
     assert.strictEqual(outputs.length, order.length);

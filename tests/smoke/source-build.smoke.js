@@ -118,6 +118,9 @@ async function main() {
   const { SipPbxExternal } = require("../../build-src/n8n/credentials/SipPbxExternal.credentials.js");
   const { PbxRuntime } = require("../../build-src/runtime/pbx-runtime.js");
   const { getPbxRuntime } = require("../../build-src/runtime/runtime-factory.js");
+  const {
+    INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED,
+  } = require("../../build-src/shared/interrupt-reasons.js");
   const { SipPbxDaemon } = require("../../build-src/daemon/sip-pbx-daemon.js");
   const { RequestContext } = require("../../build-src/daemon/core/request-context.js");
   const { ControllerMethod } = require("../../build-src/control/controller-protocol.js");
@@ -762,11 +765,12 @@ async function main() {
     assert.ok(daemon.legService.getLeg(bridgeLegB.legId));
     const bridgeInterruptPromise = runtime.waitForLegEvent(bridgeLegB.legId, {
       timeoutSeconds: 1,
+      interruptReasons: [INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED],
     });
     await runtime.hangup(bridgeLegA.legId);
     const bridgeInterruptEvent = await bridgeInterruptPromise;
     assert.strictEqual(bridgeInterruptEvent.output, "interrupt");
-    assert.strictEqual(bridgeInterruptEvent.reason, "bridge");
+    assert.strictEqual(bridgeInterruptEvent.reason, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED);
     const survivingLeg = daemon.legService.getLeg(bridgeLegB.legId);
     assert.ok(survivingLeg);
     assert.strictEqual(survivingLeg.bridgePeerLegId, undefined);

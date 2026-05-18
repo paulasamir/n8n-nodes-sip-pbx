@@ -206,3 +206,36 @@ test("PbxRuntime scopes flow-local refs while preserving public refs", async () 
   await queue.close();
   await aiTool.close();
 });
+
+test("PbxRuntime does not inject business defaults into action payloads", async () => {
+  const { PbxRuntime } = require("../../../build-src/runtime/pbx-runtime.js");
+  const calls = [];
+  const runtime = new PbxRuntime({
+    async openStream() {
+      throw new Error("Unexpected trigger stream open");
+    },
+    async call(method, params) {
+      calls.push({ method, params });
+      return {};
+    },
+  });
+
+  await runtime.breakDial("dial-1");
+  await runtime.enqueueLeg("support", "leg-1");
+  await runtime.startGlobalRecording({ legId: "leg-2" });
+
+  assert.equal(calls.length, 3);
+  assert.equal(calls[0].params.operation, "dial.break");
+  assert.equal(calls[0].params.dialId, "dial-1");
+  assert.equal("dialBreakReason" in calls[0].params, false);
+
+  assert.equal(calls[1].params.operation, "queue.putLeg");
+  assert.equal(calls[1].params.ref, "support");
+  assert.equal(calls[1].params.legId, "leg-1");
+  assert.equal("queuePlacement" in calls[1].params, false);
+
+  assert.deepEqual(calls[2].params, {
+    operation: "recording.start",
+    legId: "leg-2",
+  });
+});

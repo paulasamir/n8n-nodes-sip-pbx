@@ -1,6 +1,6 @@
 import type { PbxRuntime } from "../../runtime/pbx-runtime";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
-import { assertDtmfString, readBooleanParameter, readCollectionOptions, readFixedCollectionItems, readNumberParameter, readStringParameter, requireActionValue } from "../shared/input-normalization";
+import { assertDtmfString, readBooleanParameter, readCallInterruptReasons, readFixedCollectionItems, readNumberParameter, readOptions, readStringParameter, requireActionValue } from "../shared/input-normalization";
 import { normalizeDtmfRules } from "../shared/input-normalization";
 import { resolveLegId } from "../shared/id-resolution";
 
@@ -32,14 +32,14 @@ export async function executeHangup(node: any, runtime: PbxRuntime, item: any, i
 }
 
 export async function executeBridge(node: any, runtime: PbxRuntime, _item: any, index: number): Promise<any> {
-  const callOptions = readCollectionOptions(node, "callOptions", index);
-  const rawEmitDtmfEvents = callOptions.emitDtmfEvents;
-  const rawRelayDtmf = String(callOptions.relayDtmf || "").trim();
+  const options = readOptions(node, index);
+    const rawEmitDtmfEvents = options.emitDtmfEvents;
+    const rawRelayDtmf = String(options.relayDtmf || "").trim();
   return await runtime.bridge(
-    requireActionValue("legAId", readStringParameter(node, "legAId", index, "")),
-    requireActionValue("legBId", readStringParameter(node, "legBId", index, "")),
+    requireActionValue("legAId", readStringParameter(node, "legAId", index, OPTION_DEFAULTS.common.string)),
+    requireActionValue("legBId", readStringParameter(node, "legBId", index, OPTION_DEFAULTS.common.string)),
     {
-      emitDtmfEvents: rawEmitDtmfEvents == null ? readBooleanParameter(node, "emitDtmfEvents", index, true) : Boolean(rawEmitDtmfEvents),
+      emitDtmfEvents: rawEmitDtmfEvents == null ? readBooleanParameter(node, "emitDtmfEvents", index, OPTION_DEFAULTS.call.emitDtmfEvents) : Boolean(rawEmitDtmfEvents),
       relayDtmf: rawRelayDtmf || readStringParameter(node, "relayDtmf", index, OPTION_DEFAULTS.call.relayDtmf),
     },
   );
@@ -57,11 +57,11 @@ export async function executeWaitLegEvent(
   rules: Array<{ pattern: string; label: string }>,
 ): Promise<any> {
   const legIds = resolveWaitLegIds(node, item, index);
-  const callOptions = readCollectionOptions(node, "callOptions", index);
-  const rawInterdigitTimeoutSeconds = callOptions.interdigitTimeoutSeconds;
+  const options = readOptions(node, index);
+  const rawInterdigitTimeoutSeconds = options.interdigitTimeoutSeconds;
   const parsedInterdigitTimeoutSeconds = Number(rawInterdigitTimeoutSeconds);
   if (legIds.length === 0) {
-    throw new Error("legId is required");
+    throw new Error("legIds are required");
   }
   return await runtime.waitForLegEvent(legIds.length === 1 ? legIds[0]! : legIds, {
     timeoutSeconds: readNumberParameter(node, "timeoutSeconds", index, OPTION_DEFAULTS.call.waitTimeoutSeconds),
@@ -69,15 +69,19 @@ export async function executeWaitLegEvent(
       ? parsedInterdigitTimeoutSeconds
       : readNumberParameter(node, "interdigitTimeoutSeconds", index, OPTION_DEFAULTS.call.interdigitTimeoutSeconds),
     rules,
+    interruptReasons: readCallInterruptReasons(node, "interruptReasons", index),
+    clearDtmfBuffer: options.clearDtmfBuffer == null
+      ? OPTION_DEFAULTS.call.clearDtmfBuffer
+      : Boolean(options.clearDtmfBuffer),
     waitDtmfFallbackEnabled: readBooleanParameter(node, "waitDtmfFallbackEnabled", index, OPTION_DEFAULTS.call.waitDtmfFallbackEnabled),
-    waitDtmfMultiDigitFallbackEnabled: readBooleanParameter(node, "waitDtmfMultiDigitFallbackEnabled", index, false),
+    waitDtmfMultiDigitFallbackEnabled: readBooleanParameter(node, "waitDtmfMultiDigitFallbackEnabled", index, OPTION_DEFAULTS.call.waitDtmfMultiDigitFallbackEnabled),
     dtmfTerminatorDigit: assertDtmfString("dtmfTerminatorDigit", readStringParameter(node, "dtmfTerminatorDigit", index, OPTION_DEFAULTS.call.dtmfTerminatorDigit), { exactLength: 1 }),
   });
 }
 
 export async function executeControlRecording(node: any, runtime: PbxRuntime, item: any, index: number): Promise<any> {
   return await runtime.controlRecording(
-    requireActionValue("legId", resolveLegId(node, item, index, "legId", "recordingOptions")),
+    requireActionValue("legId", resolveLegId(node, item, index)),
     readStringParameter(node, "recordingControlAction", index, OPTION_DEFAULTS.call.recordingControlAction) as "pause" | "resume",
   );
 }

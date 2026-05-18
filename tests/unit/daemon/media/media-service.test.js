@@ -2,6 +2,13 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const {
+  SIP_DTMF_METHOD_RFC2833,
+} = require("../../../../build-src/shared/sip-media-filters.js");
+const {
+  INTERRUPT_REASON_CALL_BRIDGE_JOINED,
+  INTERRUPT_REASON_CALL_BRIDGE_REMOVED_REBRIDGE,
+} = require("../../../../build-src/shared/interrupt-reasons.js");
 
 function cleanupLeg(legService, legId) {
   if (legService.getLeg(legId)) {
@@ -142,7 +149,7 @@ test("MediaService.playTone forwards finite tone identity and duration to execut
     assert.ok(Number(capturedPlayback.durationMs || 0) > 0);
 
     await service.finalizeOperation(String(result.mediaId || ""), "interrupted", {
-      interruptReason: "test_cleanup",
+      interruptReason: "media_stopped",
     });
     await service.closeAll();
     cleanupLeg(legService, leg.legId);
@@ -328,6 +335,101 @@ test("MediaService keeps inbound DTMF in the leg queue when blocking playback is
   }
 });
 
+test("MediaService.waitMedia consumes queued leg DTMF while waiting on non-interrupting media", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+  const { PlayAudioOperation } = require("../../../../build-src/daemon/media/operations/play-audio-operation.js");
+
+  const legRegistry = new MapRegistry();
+  const legService = new LegService(legRegistry);
+  const registry = new MapRegistry();
+  const service = new MediaService(registry, legService);
+  const leg = legService.createLeg({
+    legId: "leg-wait-media-dtmf-drain",
+    direction: "inbound",
+    transportType: "websocket",
+  });
+
+  const operation = PlayAudioOperation.create(registry, {
+    mediaId: "media-wait-media-dtmf-drain",
+    legId: leg.legId,
+    options: {
+      mediaExecutionMode: "background",
+      interruptOnDtmf: false,
+    },
+    onDestroy: service.handleOperationDestroy.bind(service),
+  });
+
+  try {
+    const waitPromise = service.waitMedia({
+      waitMediaIds: [operation.mediaId],
+      waitMediaTimeoutMs: 100,
+    });
+
+    setTimeout(() => {
+      legService.publishDtmf(leg.legId, "5");
+    }, 5);
+    setTimeout(() => {
+      operation.publishEvent({
+        mediaId: operation.mediaId,
+        legId: leg.legId,
+        eventType: "completed",
+        createdAt: Date.now(),
+      });
+    }, 10);
+
+    const result = await waitPromise;
+    assert.strictEqual(result.status, "completed");
+    assert.strictEqual(leg.shiftEventMatching((event) => event.eventType === "dtmf"), null);
+  } finally {
+    cleanupLeg(legService, leg.legId);
+  }
+});
+
+test("MediaService deduplicates repeated transport DTMF on the same leg within a short window", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
+  const { LegService } = require("../../../../build-src/daemon/legs/leg-service.js");
+
+  const legRegistry = new MapRegistry();
+  const legService = new LegService(legRegistry);
+  const registry = new MapRegistry();
+  const service = new MediaService(registry, legService);
+  const leg = legService.createLeg({
+    legId: "leg-transport-dtmf-dedup",
+    direction: "inbound",
+    transportType: "websocket",
+  });
+
+  const originalNow = Date.now;
+  let fakeNow = 1_000;
+  Date.now = () => fakeNow;
+  try {
+    await service.handleTransportDtmf(leg.legId, "6");
+    await service.handleTransportDtmf(leg.legId, "6");
+    await service.handleTransportDtmf(leg.legId, "7");
+    fakeNow += 300;
+    await service.handleTransportDtmf(leg.legId, "6");
+
+    const first = leg.shiftEventMatching((event) => event.eventType === "dtmf");
+    const second = leg.shiftEventMatching((event) => event.eventType === "dtmf");
+    const third = leg.shiftEventMatching((event) => event.eventType === "dtmf");
+    const fourth = leg.shiftEventMatching((event) => event.eventType === "dtmf");
+
+    assert.ok(first);
+    assert.strictEqual(first.digits, "6");
+    assert.ok(second);
+    assert.strictEqual(second.digits, "7");
+    assert.ok(third);
+    assert.strictEqual(third.digits, "6");
+    assert.strictEqual(fourth, null);
+  } finally {
+    Date.now = originalNow;
+    cleanupLeg(legService, leg.legId);
+  }
+});
+
 test("MediaService.stopMedia by legId is a no-op success when the leg has no active media", async () => {
   const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
   const { MediaService } = require("../../../../build-src/daemon/media/media-service.js");
@@ -346,7 +448,6 @@ test("MediaService.stopMedia by legId is a no-op success when the leg has no act
   const result = await service.stopMedia({
     stopMediaTarget: "legId",
     stopMediaLegId: leg.legId,
-    stopMediaReason: "cleanup",
   });
 
   assert.deepStrictEqual(result, { legId: leg.legId });
@@ -422,7 +523,7 @@ test("MediaService.playTone with stopOtherMedia interrupts active playback on th
     assert.strictEqual(service.getMediaOperation(String(first.mediaId)), null);
 
     await service.finalizeOperation(String(second.mediaId), "interrupted", {
-      interruptReason: "test_cleanup",
+      interruptReason: "media_stopped",
     });
     await service.closeAll();
     cleanupLeg(legService, leg.legId);
@@ -517,7 +618,7 @@ test("MediaService.playAudio with stopOtherMedia interrupts active recording on 
     assert.strictEqual(service.getMediaOperation(String(first.mediaId)), null);
 
     await service.finalizeOperation(String(second.mediaId), "interrupted", {
-      interruptReason: "test_cleanup",
+      interruptReason: "media_stopped",
     });
     await service.closeAll();
     cleanupLeg(legService, leg.legId);
@@ -639,7 +740,7 @@ for (const scenario of [
       await new Promise((resolve) => setTimeout(resolve, 80));
       assert.ok(service.getMediaOperation(String(started.mediaId || "")));
       await service.finalizeOperation(String(started.mediaId || ""), "interrupted", {
-        interruptReason: "test_cleanup",
+        interruptReason: "media_stopped",
       });
       legRetention.release();
       await service.closeAll();
@@ -666,7 +767,7 @@ for (const scenario of [
       assert.ok(!currentLeg || currentLeg.status === "ended");
       if (service.getMediaOperation(String(started.mediaId || ""))) {
         await service.finalizeOperation(String(started.mediaId || ""), "interrupted", {
-          interruptReason: "test_cleanup",
+          interruptReason: "media_stopped",
         }).catch(() => undefined);
       }
       await service.closeAll();
@@ -890,10 +991,16 @@ test("MediaService.bridgeLegs rebridges legs after tearing down prior bridge mem
     assert.strictEqual(legService.requireLeg(oldPeerA.legId).bridgePeerLegId, undefined);
     assert.strictEqual(legService.requireLeg(oldPeerB.legId).bridgePeerLegId, undefined);
 
-    const oldPeerAInterrupt = oldPeerA.shiftEventMatching((event) => event.eventType === "interrupt");
-    const oldPeerBInterrupt = oldPeerB.shiftEventMatching((event) => event.eventType === "interrupt");
-    assert.equal(oldPeerAInterrupt?.reason, "unbridge");
-    assert.equal(oldPeerBInterrupt?.reason, "unbridge");
+    const oldPeerAInterrupts = [
+      oldPeerA.shiftEventMatching((event) => event.eventType === "interrupt"),
+      oldPeerA.shiftEventMatching((event) => event.eventType === "interrupt"),
+    ].filter(Boolean);
+    const oldPeerBInterrupts = [
+      oldPeerB.shiftEventMatching((event) => event.eventType === "interrupt"),
+      oldPeerB.shiftEventMatching((event) => event.eventType === "interrupt"),
+    ].filter(Boolean);
+    assert.deepEqual(oldPeerAInterrupts.map((event) => event.reason), [INTERRUPT_REASON_CALL_BRIDGE_JOINED, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_REBRIDGE]);
+    assert.deepEqual(oldPeerBInterrupts.map((event) => event.reason), [INTERRUPT_REASON_CALL_BRIDGE_JOINED, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_REBRIDGE]);
   } finally {
     await service.closeAll();
     for (const leg of [legA, legB, oldPeerA, oldPeerB]) {
@@ -954,17 +1061,17 @@ test("MediaService.bridgeLegs treats repeated bridge on the same pair as an idem
       emitDtmfEvents: true,
     });
     await service.bridgeLegs(legA.legId, legB.legId, {
-      relayDtmf: "rfc2833",
+      relayDtmf: SIP_DTMF_METHOD_RFC2833,
       emitDtmfEvents: false,
     });
 
     assert.strictEqual(legARetainCalls, 1);
     assert.strictEqual(legBRetainCalls, 1);
     assert.strictEqual(legService.requireLeg(legA.legId).bridgePeerLegId, legB.legId);
-    assert.strictEqual(legService.requireLeg(legA.legId).bridgeRelayDtmf, "rfc2833");
+    assert.strictEqual(legService.requireLeg(legA.legId).bridgeRelayDtmf, SIP_DTMF_METHOD_RFC2833);
     assert.strictEqual(legService.requireLeg(legA.legId).bridgeEmitDtmfEvents, false);
     assert.strictEqual(legService.requireLeg(legB.legId).bridgePeerLegId, legA.legId);
-    assert.strictEqual(legService.requireLeg(legB.legId).bridgeRelayDtmf, "rfc2833");
+    assert.strictEqual(legService.requireLeg(legB.legId).bridgeRelayDtmf, SIP_DTMF_METHOD_RFC2833);
     assert.strictEqual(legService.requireLeg(legB.legId).bridgeEmitDtmfEvents, false);
   } finally {
     await service.closeAll();

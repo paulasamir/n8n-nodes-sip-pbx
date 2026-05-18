@@ -1,6 +1,28 @@
 import os from "node:os";
 import { Worker, isMainThread } from "worker_threads";
+import {
+  INTERRUPT_REASON_CALL_BRIDGE_JOINED,
+  INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED,
+  INTERRUPT_REASON_CALL_BRIDGE_REMOVED_REBRIDGE,
+  INTERRUPT_REASON_CALL_BRIDGE_REMOVED_ROLLBACK,
+  INTERRUPT_REASON_CALL_BRIDGE_REMOVED_UNBRIDGE,
+  INTERRUPT_REASON_CALL_DTMF,
+  INTERRUPT_REASON_CALL_ENDED,
+  INTERRUPT_REASON_DAEMON_SHUTDOWN,
+  INTERRUPT_REASON_MEDIA_REPLACED,
+  INTERRUPT_REASON_MEDIA_STOPPED,
+  INTERRUPT_REASON_MEDIA_VOICE,
+  INTERRUPT_REASON_RECORDING_RESTART,
+  INTERRUPT_REASON_REQUEST_CANCELLED,
+} from "../../shared/interrupt-reasons";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
+import {
+  allowsSipDtmfMethod,
+  normalizeSipDtmfMethodFilters,
+  SIP_DTMF_METHOD_INBAND,
+  SIP_DTMF_METHOD_INFO,
+  SIP_DTMF_METHOD_RFC2833,
+} from "../../shared/sip-media-filters";
 import { DIAL_STATUS_REJECTED, LEG_STATUS_ANSWERED, LEG_STATUS_ENDED, MEDIA_EVENT_STARTED, MEDIA_EVENT_TIMEOUT } from "../../shared/result-events";
 import { MapRegistry } from "../../shared/map-registry";
 import { daemonError, isDaemonError } from "../core/daemon-error";
@@ -101,6 +123,26 @@ function shouldConsumeInboundDtmfForBlockingMedia(operations: MediaOperation[]):
   return blockingOperations.every((operation) => !Boolean(operation.options.interruptOnDtmf));
 }
 
+function collectWaitMediaDtmfDrainLegIds(operations: MediaOperation[]): string[] {
+  const drainByLegId = new Map<string, boolean>();
+  for (const operation of operations) {
+    const legId = String(operation.legId || "").trim();
+    if (!legId) {
+      continue;
+    }
+    const interruptOnDtmf = Boolean(operation.options.interruptOnDtmf);
+    const current = drainByLegId.get(legId);
+    if (current == null) {
+      drainByLegId.set(legId, !interruptOnDtmf);
+      continue;
+    }
+    drainByLegId.set(legId, current && !interruptOnDtmf);
+  }
+  return Array.from(drainByLegId.entries())
+    .filter(([, shouldDrain]) => shouldDrain)
+    .map(([legId]) => legId);
+}
+
 type EndpointTransportType = WorkerRuntimeTransportType;
 
 type WorkerHandle = {
@@ -140,6 +182,8 @@ function buildMediaDetails(snapshot: LegMediaSessionSnapshot): Record<string, un
 function compareWorkerIds(left: string, right: string): number {
   return left.localeCompare(right);
 }
+
+const TRANSPORT_DTMF_DEDUP_WINDOW_MS = 250;
 
 
 // Execution plane: worker lifecycle, placement, transport control, and worker messaging.
@@ -1250,6 +1294,7 @@ export class MediaService {
   private readonly onVoiceAgentEvent: (legId: string, event: WebSocketVoiceAgentEvent) => void;
   private readonly globalCallRecordings = new Map<string, GlobalCallRecordingState>();
   private readonly mediaRetentions = new Map<string, RetentionTicket>();
+  private readonly transportDtmfDedupByLegId = new Map<string, { digits: string; createdAt: number }>();
   // Both halves of a bridge point at the SAME ticket; either half can release the pair.
   private readonly bridgeRetentions = new Map<string, { ticket: RetentionTicket; peerLegId: string }>();
 
@@ -1559,7 +1604,7 @@ export class MediaService {
   async restartGlobalCallRecording(legId: string, input: Record<string, unknown>): Promise<{ legId: string }> {
     this.legService.requireLeg(legId);
     if (this.globalCallRecordings.has(legId)) {
-      await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: "restart" });
+      await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: INTERRUPT_REASON_RECORDING_RESTART });
     }
     return await this.startGlobalCallRecording(legId, input);
   }
@@ -1589,9 +1634,8 @@ export class MediaService {
     stopMediaTarget: string;
     stopMediaId?: string;
     stopMediaLegId?: string;
-    stopMediaReason?: string;
   }, context?: RequestContext | null): Promise<Record<string, unknown>> {
-    const reason = String(input.stopMediaReason || OPTION_DEFAULTS.stopMedia.reason);
+    const reason = INTERRUPT_REASON_MEDIA_STOPPED;
     if (input.stopMediaTarget === "legId") {
       const legId = String(input.stopMediaLegId || "").trim();
       if (!legId) {
@@ -1638,6 +1682,10 @@ export class MediaService {
     const operations = records
       .filter((entry): entry is { mediaId: string; operation: MediaOperation; snapshot: MediaEvent | null } => Boolean(entry.operation))
       .map((entry) => entry.operation);
+    const drainDtmfLegIds = collectWaitMediaDtmfDrainLegIds(operations);
+    for (const legId of drainDtmfLegIds) {
+      this.legService.getLeg(legId)?.consumeQueuedEventsMatching((event) => event.eventType === "dtmf");
+    }
     for (const operation of operations) {
       const queued = operation.shiftEvent();
       if (queued) {
@@ -1655,7 +1703,7 @@ export class MediaService {
       ? this.legService.retainLegs(uniqueLegIds, `media:waitMedia:${waitOperation.mediaIds.join(",")}`)
       : null;
     try {
-      const event = await this.waitForMediaEvent(waitOperation.mediaIds, waitOperation.timeoutMs, context);
+      const event = await this.waitForMediaEvent(waitOperation.mediaIds, waitOperation.timeoutMs, context, drainDtmfLegIds);
       if (event) {
         return this.mediaEventToResult(event);
       }
@@ -1672,11 +1720,43 @@ export class MediaService {
     this.legService.requireLeg(legId);
     const emitLegEvent = input._internalEmitLegEvent !== false;
     const skipBridgeRelay = input._internalSkipBridgeRelay === true;
-    const method = String(input.dtmfMethod || OPTION_DEFAULTS.sendDtmf.method);
-    const mediaTransportSent = digits ? await this.executionPlane.sendDtmf(legId, digits, method) : false;
-    const signalingTransportSent = digits && (!mediaTransportSent || method === "info")
-      ? await this.sendSignalingDtmf(legId, digits, method)
-      : false;
+    const requestedMethod = String(input.dtmfMethod || OPTION_DEFAULTS.sendDtmf.method).trim().toLowerCase() || OPTION_DEFAULTS.sendDtmf.method;
+    const allowedMethods = normalizeSipDtmfMethodFilters(this.legService.requireLeg(legId).signalingDetails?.allowedDtmfMethods);
+    let mediaTransportSent = false;
+    let signalingTransportSent = false;
+    let resolvedMethod = requestedMethod;
+    if (digits) {
+      if (requestedMethod === OPTION_DEFAULTS.sendDtmf.method) {
+        if (allowsSipDtmfMethod(allowedMethods, SIP_DTMF_METHOD_RFC2833)) {
+          mediaTransportSent = await this.executionPlane.sendDtmf(legId, digits, SIP_DTMF_METHOD_RFC2833);
+          if (mediaTransportSent) {
+            resolvedMethod = SIP_DTMF_METHOD_RFC2833;
+          }
+        }
+        if (!mediaTransportSent && allowsSipDtmfMethod(allowedMethods, SIP_DTMF_METHOD_INFO)) {
+          signalingTransportSent = await this.sendSignalingDtmf(legId, digits, SIP_DTMF_METHOD_INFO);
+          if (signalingTransportSent) {
+            resolvedMethod = SIP_DTMF_METHOD_INFO;
+          }
+        }
+        if (!mediaTransportSent && !signalingTransportSent && allowsSipDtmfMethod(allowedMethods, SIP_DTMF_METHOD_INBAND)) {
+          mediaTransportSent = await this.executionPlane.sendDtmf(legId, digits, SIP_DTMF_METHOD_INBAND);
+          if (mediaTransportSent) {
+            resolvedMethod = SIP_DTMF_METHOD_INBAND;
+          }
+        }
+      } else if (requestedMethod === SIP_DTMF_METHOD_INFO) {
+        if (allowsSipDtmfMethod(allowedMethods, SIP_DTMF_METHOD_INFO)) {
+          signalingTransportSent = await this.sendSignalingDtmf(legId, digits, SIP_DTMF_METHOD_INFO);
+        }
+      } else if (requestedMethod === SIP_DTMF_METHOD_INBAND) {
+        if (allowsSipDtmfMethod(allowedMethods, SIP_DTMF_METHOD_INBAND)) {
+          mediaTransportSent = await this.executionPlane.sendDtmf(legId, digits, SIP_DTMF_METHOD_INBAND);
+        }
+      } else if (allowsSipDtmfMethod(allowedMethods, SIP_DTMF_METHOD_RFC2833)) {
+        mediaTransportSent = await this.executionPlane.sendDtmf(legId, digits, SIP_DTMF_METHOD_RFC2833);
+      }
+    }
     if (digits) {
       if (emitLegEvent) {
         this.legService.publishDtmf(legId, digits);
@@ -1691,11 +1771,7 @@ export class MediaService {
       legId,
       digits,
       sent: digits.length,
-      method: mediaTransportSent && (method === OPTION_DEFAULTS.sendDtmf.method || method === "rfc2833")
-        ? "rfc2833"
-        : signalingTransportSent && (method === OPTION_DEFAULTS.sendDtmf.method || method === "info")
-          ? "info"
-          : method,
+      method: mediaTransportSent || signalingTransportSent ? resolvedMethod : requestedMethod,
     };
   }
 
@@ -1723,7 +1799,7 @@ export class MediaService {
     );
     await Promise.all(targets.map(async (mediaId) => {
       await this.finalizeOperation(mediaId, "interrupted", {
-        interruptReason: "voice",
+        interruptReason: INTERRUPT_REASON_MEDIA_VOICE,
         voiceLevel: level,
         voiceDurationMs: durationMs,
       });
@@ -1731,7 +1807,24 @@ export class MediaService {
   }
 
   async handleTransportDtmf(legId: string, digits: string): Promise<void> {
-    await this.handleInboundDtmf(legId, digits);
+    const normalizedDigits = String(digits || "").trim();
+    if (!normalizedDigits) {
+      return;
+    }
+    const createdAt = nowMs();
+    const previous = this.transportDtmfDedupByLegId.get(legId) || null;
+    if (
+      previous
+      && previous.digits === normalizedDigits
+      && (createdAt - previous.createdAt) <= TRANSPORT_DTMF_DEDUP_WINDOW_MS
+    ) {
+      return;
+    }
+    this.transportDtmfDedupByLegId.set(legId, {
+      digits: normalizedDigits,
+      createdAt,
+    });
+    await this.handleInboundDtmf(legId, normalizedDigits);
   }
 
   async ensureTransportEndpoint(legId: string): Promise<Record<string, unknown>> {
@@ -1761,6 +1854,7 @@ export class MediaService {
   }
 
   async handleLegEnded(legId: string): Promise<void> {
+    this.transportDtmfDedupByLegId.delete(legId);
     try {
       await this.handleLegEndedAsync(legId);
     } catch (error) {
@@ -1773,14 +1867,14 @@ export class MediaService {
     const bridgePeer = await this.executionPlane.beginBridgeTermination(legId);
     if (bridgePeer?.peerLegId) {
       if (this.legService.getLeg(bridgePeer.peerLegId)) {
-        this.legService.publishInterrupt(bridgePeer.peerLegId, "bridge");
+        this.legService.publishInterrupt(bridgePeer.peerLegId, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED);
       }
       this.releaseBridgeRetention(legId);
       await this.executionPlane.orphanBridgeAfterLegEnd(legId, bridgePeer.peerLegId);
     }
     if (this.globalCallRecordings.has(legId)) {
       try {
-        await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: "leg_ended" });
+        await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: INTERRUPT_REASON_CALL_ENDED });
       } catch (error) {
         console.error("[sip-pbx:media]", error instanceof Error ? error.message : String(error || "global call recording finalization failed"));
       }
@@ -1797,7 +1891,7 @@ export class MediaService {
       return;
     }
     const results = await Promise.allSettled(activeOperations.map(async (operation) => {
-      await this.finalizeOperation(operation.mediaId, "interrupted", { interruptReason: "leg_ended" });
+      await this.finalizeOperation(operation.mediaId, "interrupted", { interruptReason: INTERRUPT_REASON_CALL_ENDED });
     }));
     for (const result of results) {
       if (result.status === DIAL_STATUS_REJECTED) {
@@ -1833,6 +1927,7 @@ export class MediaService {
         await this.executionPlane.ensureTransportEndpoint(legId);
       }));
       await this.executionPlane.activateBridge(legAId, legBId, options);
+      this.publishBridgeActionInterrupts(legAId, legBId);
       return { legAId, legBId };
     }
     await this.detachPriorBridgesForRebridge(legAId, legBId);
@@ -1841,7 +1936,7 @@ export class MediaService {
       const operations = this.listMediaOperationsByLegId(legId).filter((operation) => !operation.finalized);
       await Promise.all(operations.map(async (operation) => {
         await this.finalizeOperation(operation.mediaId, "interrupted", {
-          interruptReason: "bridge",
+          interruptReason: INTERRUPT_REASON_CALL_BRIDGE_JOINED,
         });
       }));
     }));
@@ -1855,7 +1950,17 @@ export class MediaService {
       this.releaseBridgeRetention(legAId);
       throw error;
     }
+    this.publishBridgeActionInterrupts(legAId, legBId);
     return { legAId, legBId };
+  }
+
+  private publishBridgeActionInterrupts(legAId: string, legBId: string): void {
+    for (const legId of Array.from(new Set([legAId, legBId].filter(Boolean)))) {
+      if (!this.legService.getLeg(legId)) {
+        continue;
+      }
+      this.legService.publishInterrupt(legId, INTERRUPT_REASON_CALL_BRIDGE_JOINED);
+    }
   }
 
   async unbridgeLeg(legId: string): Promise<{ origLegId: string; peerLegId: string | null }> {
@@ -1864,9 +1969,9 @@ export class MediaService {
     const peerLegId = bridgePeer?.peerLegId || null;
     await this.executionPlane.deactivateBridge([legId, peerLegId]);
     if (peerLegId) {
-      this.legService.publishInterrupt(legId, "unbridge");
+      this.legService.publishInterrupt(legId, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_UNBRIDGE);
       if (this.legService.getLeg(peerLegId)) {
-        this.legService.publishInterrupt(peerLegId, "unbridge");
+        this.legService.publishInterrupt(peerLegId, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_UNBRIDGE);
       }
       this.releaseBridgeRetention(legId);
     }
@@ -1887,10 +1992,10 @@ export class MediaService {
     );
     await this.executionPlane.deactivateBridge([legId, peerLegId]);
     if (this.legService.getLeg(legId)) {
-      this.legService.publishInterrupt(legId, "unbridge");
+      this.legService.publishInterrupt(legId, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_ROLLBACK);
     }
     if (this.legService.getLeg(peerLegId)) {
-      this.legService.publishInterrupt(peerLegId, "unbridge");
+      this.legService.publishInterrupt(peerLegId, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_ROLLBACK);
     }
     this.releaseBridgeRetention(legId);
   }
@@ -1927,7 +2032,7 @@ export class MediaService {
     await this.executionPlane.deactivateBridge(affectedLegIds);
     for (const legId of affectedLegIds) {
       if (this.legService.getLeg(legId)) {
-        this.legService.publishInterrupt(legId, "unbridge");
+        this.legService.publishInterrupt(legId, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_REBRIDGE);
       }
     }
     for (const legId of affectedLegIds) {
@@ -1939,14 +2044,14 @@ export class MediaService {
     for (const operation of this.registry.values()) {
       this.clearMediaCompletionTimer(operation);
       try {
-        await operation.destroy("interrupted", { interruptReason: "shutdown" });
+        await operation.destroy("interrupted", { interruptReason: INTERRUPT_REASON_DAEMON_SHUTDOWN });
       } catch (error) {
         console.error("[sip-pbx:media]", error instanceof Error ? error.message : String(error || "media shutdown failed"));
       }
     }
     for (const legId of Array.from(this.globalCallRecordings.keys())) {
       try {
-        await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: "shutdown" });
+        await this.finalizeGlobalCallRecording(legId, "interrupted", { interruptReason: INTERRUPT_REASON_DAEMON_SHUTDOWN });
       } catch (error) {
         console.error("[sip-pbx:media]", error instanceof Error ? error.message : String(error || "global call recording shutdown failed"));
       }
@@ -1978,7 +2083,7 @@ export class MediaService {
     const operations = this.listMediaOperationsByLegId(legId).filter((operation) => !operation.finalized);
     await Promise.all(operations.map(async (operation) => {
       await this.finalizeOperation(operation.mediaId, "interrupted", {
-        interruptReason: "replaced",
+        interruptReason: INTERRUPT_REASON_MEDIA_REPLACED,
       });
     }));
   }
@@ -2035,35 +2140,74 @@ export class MediaService {
     return this.mediaEventToResult(event);
   }
 
-  private async waitForAnyMediaEvent(mediaIds: string[], timeoutMs: number): Promise<MediaEvent | null> {
+  private async waitForAnyMediaEvent(mediaIds: string[], timeoutMs: number, drainDtmfLegIds: string[] = []): Promise<MediaEvent | null> {
     const operationsToWait = mediaIds.map((mediaId) => this.requireMediaOperation(mediaId));
+    const drainLegs = Array.from(new Set(
+      drainDtmfLegIds
+        .map((legId) => this.legService.getLeg(legId))
+        .filter(Boolean),
+    ));
+    const consumeQueuedDtmf = () => {
+      for (const leg of drainLegs) {
+        leg.consumeQueuedEventsMatching((event) => event.eventType === "dtmf");
+      }
+    };
     for (const operation of operationsToWait) {
       const queued = operation.shiftEvent();
       if (queued) {
         return queued;
       }
     }
-    const tickets = operationsToWait.map((operation) => operation.waitForEventCancellable(() => true, 0));
-    for (const operation of operationsToWait) {
-      const queued = operation.shiftEvent();
-      if (queued) {
-        tickets.forEach((ticket) => ticket.cancel());
-        return queued;
+    consumeQueuedDtmf();
+    const deadlineAtMs = timeoutMs > 0 ? nowMs() + timeoutMs : Number.POSITIVE_INFINITY;
+    while (true) {
+      const mediaTickets = operationsToWait.map((operation) => operation.waitForEventCancellable(() => true, 0));
+      const dtmfTickets = drainLegs.map((leg) => ({
+        legId: leg.legId,
+        ticket: leg.waitForEventCancellable((event) => event.eventType === "dtmf", 0),
+      }));
+      for (const operation of operationsToWait) {
+        const queued = operation.shiftEvent();
+        if (queued) {
+          mediaTickets.forEach((ticket) => ticket.cancel());
+          dtmfTickets.forEach(({ ticket }) => ticket.cancel());
+          return queued;
+        }
       }
-    }
-    const waitPromises = tickets.map((ticket) => ticket.promise);
-    let timeoutHandle: NodeJS.Timeout | null = null;
-    const timeoutPromise = timeoutMs > 0
-      ? new Promise<MediaEvent | null>((resolve) => {
-          timeoutHandle = setTimeout(() => resolve(null), timeoutMs);
-        })
-      : null;
-    try {
-      return await Promise.race(timeoutPromise ? [...waitPromises, timeoutPromise] : waitPromises);
-    } finally {
-      tickets.forEach((ticket) => ticket.cancel());
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
+      consumeQueuedDtmf();
+      const remainingWaitMs = Number.isFinite(deadlineAtMs)
+        ? Math.max(0, deadlineAtMs - nowMs())
+        : 0;
+      if (Number.isFinite(deadlineAtMs) && remainingWaitMs <= 0) {
+        mediaTickets.forEach((ticket) => ticket.cancel());
+        dtmfTickets.forEach(({ ticket }) => ticket.cancel());
+        return null;
+      }
+      let timeoutHandle: NodeJS.Timeout | null = null;
+      const timeoutPromise = Number.isFinite(deadlineAtMs)
+        ? new Promise<{ kind: "timeout" }>((resolve) => {
+            timeoutHandle = setTimeout(() => resolve({ kind: "timeout" }), remainingWaitMs);
+          })
+        : null;
+      try {
+        const outcome = await Promise.race([
+          ...mediaTickets.map(async (ticket) => ({ kind: "media" as const, event: await ticket.promise })),
+          ...dtmfTickets.map(async ({ ticket }) => ({ kind: "dtmf" as const, event: await ticket.promise })),
+          ...(timeoutPromise ? [timeoutPromise] : []),
+        ]);
+        if (outcome.kind === "media") {
+          return outcome.event;
+        }
+        if (outcome.kind === "timeout") {
+          return null;
+        }
+        consumeQueuedDtmf();
+      } finally {
+        mediaTickets.forEach((ticket) => ticket.cancel());
+        dtmfTickets.forEach(({ ticket }) => ticket.cancel());
+        if (timeoutHandle) {
+          clearTimeout(timeoutHandle);
+        }
       }
     }
   }
@@ -2149,7 +2293,7 @@ export class MediaService {
     const cancelled = new Promise<Record<string, unknown>>((_resolve, reject) => {
       releaseCancel = context.onCancel(() => {
         void this.finalizeOperation(mediaId, "interrupted", {
-          interruptReason: "request_cancelled",
+          interruptReason: INTERRUPT_REASON_REQUEST_CANCELLED,
         }).catch((error) => {
           console.error(
             `[sip-pbx:media] blocking media cancellation finalization failed; media=${mediaId}; error=${error instanceof Error ? error.message : String(error || "unknown")}`,
@@ -2175,9 +2319,10 @@ export class MediaService {
     mediaIds: string[],
     timeoutMs: number,
     context?: RequestContext | null,
+    drainDtmfLegIds: string[] = [],
   ): Promise<import("./operations/media-operation").MediaEvent | null> {
     if (!context) {
-      return await this.waitForAnyMediaEvent(mediaIds, timeoutMs);
+      return await this.waitForAnyMediaEvent(mediaIds, timeoutMs, drainDtmfLegIds);
     }
     let release = () => undefined;
     const cancelled = new Promise<MediaEvent | null>((_resolve, reject) => {
@@ -2187,7 +2332,7 @@ export class MediaService {
     });
     try {
       return await Promise.race([
-        this.waitForAnyMediaEvent(mediaIds, timeoutMs),
+        this.waitForAnyMediaEvent(mediaIds, timeoutMs, drainDtmfLegIds),
         cancelled,
       ]);
     } finally {
@@ -2201,7 +2346,7 @@ export class MediaService {
     );
     await Promise.all(targets.map(async (mediaId) => {
       await this.finalizeOperation(mediaId, "interrupted", {
-        interruptReason: "dtmf",
+        interruptReason: INTERRUPT_REASON_CALL_DTMF,
         digit: digits.slice(0, 1) || null,
         digits,
       });
@@ -2239,7 +2384,7 @@ export class MediaService {
     const bridgePeer = this.executionPlane.getBridgePeerInfo(legId);
     if (bridgePeer && String(bridgePeer.relayDtmf || OPTION_DEFAULTS.call.relayDtmf) !== "disabled") {
       await this.relayBridgeDtmf(bridgePeer, digits, {
-        dtmfMethod: "rfc2833",
+        dtmfMethod: OPTION_DEFAULTS.sendDtmf.method,
       });
     }
   }

@@ -1,12 +1,11 @@
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
-import { readCollectionOptions, readFixedCollectionItems, readNumberParameter, readStringParameter } from "../shared/input-normalization";
+import { readFixedCollectionItems, readNumberParameter, readOptions, readStringParameter } from "../shared/input-normalization";
 
 type SharedAuthMode = "static" | "digest-first" | "raw";
 
 type SharedAuthTriggerConfigInput =
   | {
       kind: "extensions";
-      optionsName: string;
       authModeName: string;
       staticCredentialsName: string;
       authTimeoutDefault: number;
@@ -14,7 +13,6 @@ type SharedAuthTriggerConfigInput =
     }
   | {
       kind: "trunk";
-      optionsName: string;
       authModeName: string;
       staticUsernameName: string;
       staticPasswordName: string;
@@ -56,7 +54,7 @@ export function readSharedAuthTriggerConfig(node: any, index: number, input: Sha
     ),
     input.kind === "extensions" ? OPTION_DEFAULTS.trigger.extensions.authMode : OPTION_DEFAULTS.trigger.trunk.authMode,
   );
-  const options = readCollectionOptions(node, input.optionsName, index);
+  const options = readOptions(node, index);
   const config: SharedAuthTriggerConfig = {
     authMode,
     authorizationUsernamePrefix: input.kind === "extensions" && authMode !== "raw"
@@ -73,9 +71,9 @@ export function readSharedAuthTriggerConfig(node: any, index: number, input: Sha
       }));
     } else {
       config.staticCredentials = [{
-        username: readStringParameter(node, input.staticUsernameName, index, ""),
-        password: readStringParameter(node, input.staticPasswordName, index, ""),
-        extension: "",
+        username: readStringParameter(node, input.staticUsernameName, index, OPTION_DEFAULTS.common.string),
+        password: readStringParameter(node, input.staticPasswordName, index, OPTION_DEFAULTS.common.string),
+        extension: OPTION_DEFAULTS.common.string,
       }];
     }
     return config;

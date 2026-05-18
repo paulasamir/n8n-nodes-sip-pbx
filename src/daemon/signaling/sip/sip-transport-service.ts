@@ -8,6 +8,15 @@ import {
   TRUNK_CONNECTION_MODE_FIXED,
   type TrunkConnectionMode,
 } from "../../../shared/trunk-trigger";
+import {
+  allowsSipDtmfMethod,
+  normalizeSipAudioCodecFilters,
+  normalizeSipDtmfMethodFilters,
+  SIP_DTMF_METHOD_INFO,
+  SIP_DTMF_METHOD_RFC2833,
+  type SipAudioCodecFilter,
+  type SipDtmfMethodFilter,
+} from "../../../shared/sip-media-filters";
 import { LEG_STATUS_ENDED } from "../../../shared/result-events";
 import { LegCoordinator } from "../../legs/leg-coordinator";
 import { daemonError } from "../../core/daemon-error";
@@ -47,6 +56,8 @@ type ExtensionsHost = SipHostBase & {
   authorizationUsernamePrefix: string;
   continueTraversalOnAuthReject: boolean;
   staticCredentials: Array<{ username: string; password: string; extension: string }>;
+  codecs: SipAudioCodecFilter[];
+  dtmfMethods: SipDtmfMethodFilter[];
 };
 
 type TrunkHost = SipHostBase & {
@@ -59,6 +70,8 @@ type TrunkHost = SipHostBase & {
   authTimeoutMs: number;
   continueTraversalOnAuthReject: boolean;
   staticCredentials: Array<{ username: string; password: string; extension: string }>;
+  codecs: SipAudioCodecFilter[];
+  dtmfMethods: SipDtmfMethodFilter[];
   registrationExpires: number;
   registerHeaders: SipHeaderEntry[];
   registrationTimer: ReturnType<typeof setTimeout> | null;
@@ -474,6 +487,8 @@ export class SipTransportService {
       existing.authorizationUsernamePrefix = normalizeAuthorizationUsernamePrefix(config.authorizationUsernamePrefix);
       existing.continueTraversalOnAuthReject = config.continueTraversalOnAuthReject === true;
       existing.staticCredentials = normalizeStaticCredentials(config.staticCredentials);
+      existing.codecs = normalizeSipAudioCodecFilters(config.codecs);
+      existing.dtmfMethods = normalizeSipDtmfMethodFilters(config.dtmfMethods);
       return;
     }
     if (listener.bindPort > 0) {
@@ -494,6 +509,8 @@ export class SipTransportService {
       authorizationUsernamePrefix: normalizeAuthorizationUsernamePrefix(config.authorizationUsernamePrefix),
       continueTraversalOnAuthReject: config.continueTraversalOnAuthReject === true,
       staticCredentials: normalizeStaticCredentials(config.staticCredentials),
+      codecs: normalizeSipAudioCodecFilters(config.codecs),
+      dtmfMethods: normalizeSipDtmfMethodFilters(config.dtmfMethods),
     };
     this.extensionsHosts.set(ref, host);
   }
@@ -572,6 +589,8 @@ export class SipTransportService {
       existing.authTimeoutMs = authTimeoutMs;
       existing.continueTraversalOnAuthReject = config.continueTraversalOnAuthReject === true;
       existing.staticCredentials = staticCredentials;
+      existing.codecs = normalizeSipAudioCodecFilters(config.codecs);
+      existing.dtmfMethods = normalizeSipDtmfMethodFilters(config.dtmfMethods);
       existing.registrationExpires = Number(config.registrationExpires || OPTION_DEFAULTS.sip.registrationExpiresSeconds);
       existing.registerHeaders = this.normalizeHeaderEntries(config.registerHeaders);
       if (connectionMode !== TRUNK_CONNECTION_MODE_DYNAMIC) {
@@ -604,6 +623,8 @@ export class SipTransportService {
       authTimeoutMs,
       continueTraversalOnAuthReject: config.continueTraversalOnAuthReject === true,
       staticCredentials,
+      codecs: normalizeSipAudioCodecFilters(config.codecs),
+      dtmfMethods: normalizeSipDtmfMethodFilters(config.dtmfMethods),
       registrationExpires: Number(config.registrationExpires || OPTION_DEFAULTS.sip.registrationExpiresSeconds),
       registerHeaders: this.normalizeHeaderEntries(config.registerHeaders),
       registrationTimer: null,
@@ -686,6 +707,8 @@ export class SipTransportService {
         localRtpAdvertisedIp: resolved.publicHost,
         remoteRtpHost: null,
         remoteRtpPort: 0,
+        allowedAudioCodecs: resolved.codecs,
+        allowedDtmfMethods: resolved.dtmfMethods,
       });
       return true;
     });
@@ -720,6 +743,10 @@ export class SipTransportService {
       const localSdp = this.buildInitialOutboundSdp(
         String(transportDetails.localRtpHost || resolved.publicHost || address.address || resolved.localBindIp),
         Number(transportDetails.localRtpPort || 0),
+        {
+          codecs: resolved.codecs,
+          dtmfMethods: resolved.dtmfMethods,
+        },
       );
       session = {
         legId,
@@ -915,7 +942,10 @@ export class SipTransportService {
 
   async sendDtmf(legId: string, digits: string, method: string): Promise<boolean> {
     const normalizedMethod = String(method || OPTION_DEFAULTS.sendDtmf.method);
-    if (normalizedMethod !== OPTION_DEFAULTS.sendDtmf.method && normalizedMethod !== "info") {
+    if (normalizedMethod !== OPTION_DEFAULTS.sendDtmf.method && normalizedMethod !== SIP_DTMF_METHOD_INFO) {
+      return false;
+    }
+    if (!this.isInfoDtmfAllowedForLeg(legId)) {
       return false;
     }
     if (!digits) {
@@ -1639,6 +1669,10 @@ export class SipTransportService {
         continue;
       }
       const contact = parseSipUri(session.contactUri);
+      if (!this.isInfoDtmfAllowedForLeg(legId)) {
+        await this.sendStatelessResponse(session.socket, message, rinfo, 415, "Unsupported Media Type", contact?.host || "127.0.0.1", Number(contact?.port || 0));
+        return;
+      }
       await this.sendStatelessResponse(session.socket, message, rinfo, 200, "OK", contact?.host || "127.0.0.1", Number(contact?.port || 0));
       if (digits) {
         this.onInboundDtmf(legId, digits);
@@ -1652,6 +1686,10 @@ export class SipTransportService {
     this.beginServerTransaction(message);
     const digits = this.parseDtmfRelayBody(message.body || "");
     const contact = parseSipUri(session.contactUri);
+    if (!this.isInfoDtmfAllowedForLeg(session.legId)) {
+      await this.sendStatelessResponse(session.socket, message, rinfo, 415, "Unsupported Media Type", contact?.host || "127.0.0.1", Number(contact?.port || 0));
+      return;
+    }
     await this.sendStatelessResponse(session.socket, message, rinfo, 200, "OK", contact?.host || "127.0.0.1", Number(contact?.port || 0));
     if (digits) {
       this.onInboundDtmf(session.legId, digits);
@@ -2290,7 +2328,10 @@ export class SipTransportService {
   private async startInboundTrunkInvite(host: TrunkHost, message: SipMessage, rinfo: dgram.RemoteInfo): Promise<void> {
     const invite = this.createInboundInvite(host.ref, host.publicRef || host.ref, message, "sip");
     const result = this.trunkService.emitInboundInvite(invite);
-    this.prepareInboundRtpSession(result.legId, host.bindIp, host.advertisedIp, message, rinfo);
+    this.prepareInboundRtpSession(result.legId, host.bindIp, host.advertisedIp, message, rinfo, {
+      codecs: host.codecs,
+      dtmfMethods: host.dtmfMethods,
+    });
     this.inboundSessions.set(
       result.legId,
       this.createInboundSession(host.socket, result.legId, message, rinfo, host.advertisedIp, host.bindPort),
@@ -2318,7 +2359,10 @@ export class SipTransportService {
       }),
     );
     const result = this.extensionService.emitInboundInvite(invite);
-    this.prepareInboundRtpSession(result.legId, host.bindIp, host.advertisedIp, message, rinfo);
+    this.prepareInboundRtpSession(result.legId, host.bindIp, host.advertisedIp, message, rinfo, {
+      codecs: host.codecs,
+      dtmfMethods: host.dtmfMethods,
+    });
     this.inboundSessions.set(
       result.legId,
       this.createInboundSession(host.socket, result.legId, message, rinfo, host.advertisedIp, host.bindPort),
@@ -2604,8 +2648,21 @@ export class SipTransportService {
       .join("");
   }
 
-  private buildInitialOutboundSdp(connectionIp: string, rtpPort: number): string {
-    const localAudio = buildLocalAudioSdpDescription(rtpPort);
+  private buildInitialOutboundSdp(
+    connectionIp: string,
+    rtpPort: number,
+    options?: {
+      codecs?: unknown;
+      dtmfMethods?: unknown;
+    },
+  ): string {
+    const localAudio = buildLocalAudioSdpDescription(
+      rtpPort,
+      [],
+      {},
+      normalizeSipAudioCodecFilters(options?.codecs),
+      normalizeSipDtmfMethodFilters(options?.dtmfMethods),
+    );
     if (!localAudio) {
       return "";
     }
@@ -2640,6 +2697,10 @@ export class SipTransportService {
     advertisedIp: string,
     message: SipMessage,
     rinfo: dgram.RemoteInfo,
+    options?: {
+      codecs?: unknown;
+      dtmfMethods?: unknown;
+    },
   ): void {
     const sdp = parseSipSdp(message.body || "");
     this.legService.updateSignalingDetails(legId, {
@@ -2650,6 +2711,8 @@ export class SipTransportService {
       remoteRtpPort: sdp.remoteRtpPort || 0,
       payloadTypes: sdp.payloadTypes,
       payloadCodecs: sdp.payloadCodecs,
+      allowedAudioCodecs: normalizeSipAudioCodecFilters(options?.codecs),
+      allowedDtmfMethods: normalizeSipDtmfMethodFilters(options?.dtmfMethods),
     });
   }
 
@@ -2664,6 +2727,14 @@ export class SipTransportService {
       connectionIp,
       audioLines: this.readLocalSdpAudioLines(details.localSdpAudioLines),
     });
+  }
+
+  private isInfoDtmfAllowedForLeg(legId: string): boolean {
+    const details = this.legService.getLeg(legId)?.signalingDetails || {};
+    return allowsSipDtmfMethod(
+      normalizeSipDtmfMethodFilters(details.allowedDtmfMethods),
+      SIP_DTMF_METHOD_INFO,
+    );
   }
 
   private async handleOutboundReinvite(
@@ -2769,6 +2840,8 @@ export class SipTransportService {
     authUsername: string;
     authPassword: string;
     headers: SipHeaderEntry[];
+    codecs: SipAudioCodecFilter[];
+    dtmfMethods: SipDtmfMethodFilter[];
   } | null> {
     const headers = this.normalizeHeaderEntries(dial.metadata.customSipHeaders);
     const destinationUser = normalizeDialDestinationUser(target.kind === "opaque" ? target.value : target.extensionNumber);
@@ -2809,6 +2882,8 @@ export class SipTransportService {
         authUsername: "",
         authPassword: "",
         headers,
+        codecs: configHost.codecs.slice(),
+        dtmfMethods: configHost.dtmfMethods.slice(),
       };
     }
     const trunkHost = dial.mode === "trunk"
@@ -2840,6 +2915,8 @@ export class SipTransportService {
         authUsername: "",
         authPassword: "",
         headers,
+        codecs: trunkHost.codecs.slice(),
+        dtmfMethods: trunkHost.dtmfMethods.slice(),
       };
     }
     const credentials = trunkHost
@@ -2858,6 +2935,12 @@ export class SipTransportService {
       return null;
     }
     const localBindIp = trunkHost ? trunkHost.bindIp : normalizeSipBindIp(credentials.localBindIp);
+    const codecs = trunkHost
+      ? trunkHost.codecs.slice()
+      : normalizeSipAudioCodecFilters(dial.metadata.codecs);
+    const dtmfMethods = trunkHost
+      ? trunkHost.dtmfMethods.slice()
+      : normalizeSipDtmfMethodFilters(dial.metadata.dtmfMethods);
     return {
       socket: trunkHost ? trunkHost.socket : null,
       ownsSocket: !trunkHost,
@@ -2871,6 +2954,8 @@ export class SipTransportService {
       authUsername: String(credentials.username || "").trim(),
       authPassword: String(credentials.password || ""),
       headers,
+      codecs,
+      dtmfMethods,
     };
   }
 

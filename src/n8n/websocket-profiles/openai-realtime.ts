@@ -1,8 +1,8 @@
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
-import { readCollectionOptions } from "../shared/input-normalization";
+import { readOptions } from "../shared/input-normalization";
 import { readCredentialsParameter } from "../shared/credential-loading";
 import {
-  buildAddOptionsCollectionProperty,
+  buildOptionsCollectionProperty,
   type UiProperty,
   WEBSOCKET_PROMPT_VARIABLES_JSON_HINT,
 } from "../ui/description-fragments";
@@ -56,7 +56,7 @@ function buildOpenAiRealtimePrimaryProperties(_show: Record<string, unknown>): U
       displayName: "OpenAI API",
       name: "openAiApi",
       type: "credentials",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       displayOptions: { show: profileShow },
     },
   ];
@@ -65,7 +65,7 @@ function buildOpenAiRealtimePrimaryProperties(_show: Record<string, unknown>): U
 function buildOpenAiRealtimeOptionCollections(_show: Record<string, unknown>): UiProperty[] {
   const profileShow = extendShow(_show);
   return [
-    buildAddOptionsCollectionProperty("dialOptions", profileShow, [
+    buildOptionsCollectionProperty({ show: profileShow }, [
       {
         displayName: "OpenAI Realtime Model",
         name: "openaiRealtimeModel",
@@ -81,10 +81,10 @@ function buildOpenAiRealtimeOptionCollections(_show: Record<string, unknown>): U
         default: OPTION_DEFAULTS.dial.openaiRealtimeInputTranscriptionModel,
         typeOptions: { loadOptionsMethod: "getOpenAiRealtimeInputTranscriptionModels" },
       },
-      { displayName: "OpenAI Instructions", name: "openaiRealtimeInstructions", type: "string", typeOptions: { rows: 4 }, default: "" },
-      { displayName: "OpenAI Prompt ID", name: "openaiRealtimePromptId", type: "string", default: "" },
-      { displayName: "OpenAI Prompt Version", name: "openaiRealtimePromptVersion", type: "string", default: "" },
-      { displayName: "OpenAI Prompt Variables JSON", name: "openaiRealtimePromptVariablesJson", type: "json", default: "{}", description: WEBSOCKET_PROMPT_VARIABLES_JSON_HINT },
+      { displayName: "OpenAI Instructions", name: "openaiRealtimeInstructions", type: "string", typeOptions: { rows: 4 }, default: OPTION_DEFAULTS.dial.openaiRealtimeInstructions },
+      { displayName: "OpenAI Prompt ID", name: "openaiRealtimePromptId", type: "string", default: OPTION_DEFAULTS.dial.openaiRealtimePromptId },
+      { displayName: "OpenAI Prompt Version", name: "openaiRealtimePromptVersion", type: "string", default: OPTION_DEFAULTS.dial.openaiRealtimePromptVersion },
+      { displayName: "OpenAI Prompt Variables JSON", name: "openaiRealtimePromptVariablesJson", type: "json", default: OPTION_DEFAULTS.dial.openaiRealtimePromptVariablesJson, description: WEBSOCKET_PROMPT_VARIABLES_JSON_HINT },
     ]),
   ];
 }
@@ -110,7 +110,7 @@ export const openAiRealtimeWebSocketDialProfile: WebSocketDialProfileDescriptor 
   async applyInput({ input, index, node }) {
     const credentials = await readCredentialsParameter(node, "openAiApi", index);
     input.openaiApiKey = String(credentials?.apiKey || "").trim();
-    const options = readCollectionOptions(node, "dialOptions", index);
+    const options = readOptions(node, index);
     for (const fieldName of [
       "openaiRealtimeModel",
       "openaiRealtimeVoice",

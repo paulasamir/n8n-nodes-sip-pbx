@@ -617,26 +617,25 @@ async function main() {
     assert.strictEqual(playback.status, "started");
 
     const waitBeforeStop = await runtime.waitMedia({
-      waitMediaIds: [playback.mediaId],
+      mediaIds: [playback.mediaId],
       waitMediaTimeoutSeconds: 0.01,
     });
     assert.strictEqual(waitBeforeStop.status, "timeout");
 
     const waitingPlaybackPromise = runtime.waitMedia({
-      waitMediaIds: [playback.mediaId],
+      mediaIds: [playback.mediaId],
       waitMediaTimeoutSeconds: 0.1,
     });
     await sleep(10);
     const stopPlayback = await runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: playback.mediaId,
-      stopMediaReason: "smoke_stop",
+      mediaId: playback.mediaId,
     });
     assert.strictEqual(stopPlayback.mediaId, playback.mediaId);
 
     const waitedPlayback = await waitingPlaybackPromise;
     assert.strictEqual(waitedPlayback.status, "interrupted");
-    assert.strictEqual(waitedPlayback.interruptReason, "smoke_stop");
+    assert.strictEqual(waitedPlayback.interruptReason, "media_stopped");
 
     const tone = await runtime.playTone(leg.legId, {
       mediaExecutionMode: "blocking",
@@ -672,8 +671,7 @@ async function main() {
     assert.strictEqual(mixDetails.playbackMix[1].effectiveGain, 0.4);
     await runtime.stopMedia({
       stopMediaTarget: "legId",
-      stopMediaLegId: mixLeg.legId,
-      stopMediaReason: "mix_cleanup",
+      legId: mixLeg.legId,
     });
 
     const boostMixLeg = daemon.legService.createLeg({
@@ -704,8 +702,7 @@ async function main() {
     assert.strictEqual(boostMixDetails.playbackMix[1].effectiveGain, 0.5);
     await runtime.stopMedia({
       stopMediaTarget: "legId",
-      stopMediaLegId: boostMixLeg.legId,
-      stopMediaReason: "mix_boost_cleanup",
+      legId: boostMixLeg.legId,
     });
 
     const voiceLeg = daemon.legService.createLeg({
@@ -724,13 +721,13 @@ async function main() {
       voiceDurationMs: 50,
     });
     const voiceWaitPromise = runtime.waitMedia({
-      waitMediaIds: [voicePlayback.mediaId],
+      mediaIds: [voicePlayback.mediaId],
       waitMediaTimeoutSeconds: 0.1,
     });
     await daemon.mediaService.reportVoiceActivity(voiceLeg.legId, 0.4, 100);
     const voiceInterruptedMedia = await voiceWaitPromise;
     assert.strictEqual(voiceInterruptedMedia.status, "interrupted");
-    assert.strictEqual(voiceInterruptedMedia.interruptReason, "voice");
+    assert.strictEqual(voiceInterruptedMedia.interruptReason, "media_voice");
 
     const dtmf = await runtime.sendDtmf(leg.legId, "45", {
       dtmfMethod: "rfc2833",
@@ -754,7 +751,7 @@ async function main() {
     });
     await sleep(150);
     const dtmfWaitPromise = runtime.waitMedia({
-      waitMediaIds: [dtmfPlayback.mediaId],
+      mediaIds: [dtmfPlayback.mediaId],
       waitMediaTimeoutSeconds: 0.1,
     });
     const legWaitPromise = runtime.waitForLegEvent(dtmfLeg.legId, {
@@ -771,7 +768,7 @@ async function main() {
     const dtmfInterruptedMedia = await dtmfWaitPromise;
     const dtmfLegEvent = await legWaitPromise;
     assert.strictEqual(dtmfInterruptedMedia.status, "interrupted");
-    assert.strictEqual(dtmfInterruptedMedia.interruptReason, "dtmf");
+    assert.strictEqual(dtmfInterruptedMedia.interruptReason, "call_dtmf");
     assert.strictEqual(dtmfLegEvent.output, "matched");
     assert.strictEqual(dtmfLegEvent.digits, "7");
 
@@ -1227,7 +1224,7 @@ async function main() {
         "",
       ].join("\r\n"), extensionEndpoint.port, extensionEndpoint.host);
       const extensionPlaybackWaitPromise = runtime.waitMedia({
-        waitMediaIds: [extensionPlayback.mediaId],
+        mediaIds: [extensionPlayback.mediaId],
         waitMediaTimeoutSeconds: 1,
       });
       const extensionByeText = [
@@ -1247,7 +1244,7 @@ async function main() {
       assert.strictEqual(extensionByeOk.message.statusCode, 200);
       const extensionPlaybackWait = await extensionPlaybackWaitPromise;
       assert.strictEqual(extensionPlaybackWait.status, "interrupted");
-      assert.strictEqual(extensionPlaybackWait.interruptReason, "leg_ended");
+      assert.strictEqual(extensionPlaybackWait.interruptReason, "call_ended");
       await waitForCondition(() => {
         const leg = daemon.legService.getLeg(staticInviteEvent.payload.legId);
         return !leg || leg.status === "ended";
@@ -1473,7 +1470,7 @@ async function main() {
 	      voiceDurationMs: 60,
 	    });
 	    const directVoiceInterruptedPromise = runtime.waitMedia({
-	      waitMediaIds: [directVoicePlayback.mediaId],
+	      mediaIds: [directVoicePlayback.mediaId],
 	      waitMediaTimeoutSeconds: 1,
 	    });
 	    const directPcmaCodec = createCodec("pcma");
@@ -1507,7 +1504,7 @@ async function main() {
 	    directPcmaCodec.close();
 	    const directVoiceInterrupted = await directVoiceInterruptedPromise;
 	    assert.strictEqual(directVoiceInterrupted.status, "interrupted");
-	    assert.strictEqual(directVoiceInterrupted.interruptReason, "voice");
+	    assert.strictEqual(directVoiceInterrupted.interruptReason, "media_voice");
 	    const directDtmfPacketPromise = waitForUdpBuffer(
 	      directRtpPeer,
 	      (buffer) => buffer.length > 12 && rtpPayloadType(buffer) === 97,
@@ -1607,8 +1604,7 @@ async function main() {
 	    assert.strictEqual(rtpPayloadType(directPlaybackPacket.buffer), 8);
 	    await runtime.stopMedia({
 	      stopMediaTarget: "mediaId",
-	      stopMediaId: directPlayback.mediaId,
-	      stopMediaReason: "direct_playback_cleanup",
+	      mediaId: directPlayback.mediaId,
 	    });
 	    const directPreRollPcmaCodec = createCodec("pcma");
 	    const directPreRollPcmaDescriptor = directPreRollPcmaCodec.resolveDescriptor(8, {
@@ -1649,8 +1645,7 @@ async function main() {
 	    await sleep(40);
 	    const directPreRollStop = await runtime.stopMedia({
 	      stopMediaTarget: "mediaId",
-	      stopMediaId: directPreRollRecording.mediaId,
-	      stopMediaReason: "direct_recording_preroll_complete",
+	      mediaId: directPreRollRecording.mediaId,
 	    });
 	    assert.strictEqual(directPreRollStop.status, "interrupted");
 	    assert.ok(directPreRollStop.outputBinaryBase64);
@@ -1692,8 +1687,7 @@ async function main() {
 	    await sleep(30);
 	    const directRecordingStop = await runtime.stopMedia({
 	      stopMediaTarget: "mediaId",
-	      stopMediaId: directRecording.mediaId,
-	      stopMediaReason: "direct_recording_complete",
+	      mediaId: directRecording.mediaId,
 	    });
 	    assert.strictEqual(directRecordingStop.status, "interrupted");
 	    assert.ok(directRecordingStop.outputBinaryBase64);
@@ -1736,7 +1730,7 @@ async function main() {
 	    });
 	    assert.strictEqual(directSilenceRecording.status, "started");
 	    const directSilenceWaitPromise = runtime.waitMedia({
-	      waitMediaIds: [directSilenceRecording.mediaId],
+	      mediaIds: [directSilenceRecording.mediaId],
 	      waitMediaTimeoutSeconds: 1,
 	    });
 	    for (let index = 0; index < 3; index += 1) {
@@ -1756,7 +1750,7 @@ async function main() {
 	    directSilencePcmaCodec.close();
 	    const directSilenceInterrupted = await directSilenceWaitPromise;
 	    assert.strictEqual(directSilenceInterrupted.status, "interrupted");
-	    assert.strictEqual(directSilenceInterrupted.interruptReason, "silence");
+	    assert.strictEqual(directSilenceInterrupted.interruptReason, "media_silence");
 	    assert.ok(directSilenceInterrupted.outputBinaryBase64);
 	    const directSilenceBuffer = Buffer.from(directSilenceInterrupted.outputBinaryBase64, "base64");
 	    assert.ok(directSilenceBuffer.length > 44);
@@ -1772,11 +1766,11 @@ async function main() {
 	    });
 	    assert.strictEqual(directNoRtpSilenceRecording.status, "started");
 	    const directNoRtpSilenceInterrupted = await runtime.waitMedia({
-	      waitMediaIds: [directNoRtpSilenceRecording.mediaId],
+	      mediaIds: [directNoRtpSilenceRecording.mediaId],
 	      waitMediaTimeoutSeconds: 1,
 	    });
 	    assert.strictEqual(directNoRtpSilenceInterrupted.status, "interrupted");
-	    assert.strictEqual(directNoRtpSilenceInterrupted.interruptReason, "silence");
+	    assert.strictEqual(directNoRtpSilenceInterrupted.interruptReason, "media_silence");
 	    assert.ok(directNoRtpSilenceInterrupted.outputBinaryBase64);
 	    const directNoRtpSilenceBuffer = Buffer.from(directNoRtpSilenceInterrupted.outputBinaryBase64, "base64");
 	    assert.ok(directNoRtpSilenceBuffer.length > 44);
@@ -1848,8 +1842,7 @@ async function main() {
 	    assert.strictEqual(rtpPayloadType(directReinvitePlaybackPacket.buffer), 0);
 	    await runtime.stopMedia({
 	      stopMediaTarget: "mediaId",
-	      stopMediaId: directReinvitePlayback.mediaId,
-	      stopMediaReason: "direct_reinvite_playback_cleanup",
+	      mediaId: directReinvitePlayback.mediaId,
 	    });
 	    const bridgePeer = dgram.createSocket("udp4");
 	    await new Promise((resolve) => bridgePeer.bind(0, "127.0.0.1", resolve));
@@ -2224,7 +2217,7 @@ async function main() {
     });
     assert.strictEqual(trunkCancelPlayback.status, "started");
     const trunkCancelPlaybackWaitPromise = runtime.waitMedia({
-      waitMediaIds: [trunkCancelPlayback.mediaId],
+      mediaIds: [trunkCancelPlayback.mediaId],
       waitMediaTimeoutSeconds: 1,
     });
     await sendUdp(providerSocket, buildCancel({
@@ -2252,7 +2245,7 @@ async function main() {
 	    await waitForCondition(() => !daemon.legService.getLeg(trunkCancelEvent.payload.legId), 1000, "trunk-cancel-leg-cleanup");
 	    const trunkCancelPlaybackWait = await trunkCancelPlaybackWaitPromise;
     assert.strictEqual(trunkCancelPlaybackWait.status, "interrupted");
-    assert.strictEqual(trunkCancelPlaybackWait.interruptReason, "leg_ended");
+    assert.strictEqual(trunkCancelPlaybackWait.interruptReason, "call_ended");
     const trunkEventCountBeforeInvite = realTrunkEvents.filter((event) => event.branch === "Call").length;
     const providerRtpSocket = dgram.createSocket("udp4");
     await new Promise((resolve) => providerRtpSocket.bind(0, "127.0.0.1", resolve));
@@ -2321,8 +2314,7 @@ async function main() {
 	    assert.ok(trunkPlaybackPacket.buffer.length > 12);
 	    await runtime.stopMedia({
 	      stopMediaTarget: "mediaId",
-	      stopMediaId: trunkPlayback.mediaId,
-	      stopMediaReason: "trunk_playback_cleanup",
+	      mediaId: trunkPlayback.mediaId,
 	    });
 	    const byeText = [
 	      `BYE sip:n8n@127.0.0.1:${trunkEndpoint.port} SIP/2.0`,
@@ -2415,8 +2407,7 @@ async function main() {
     assert.ok(websocketPlaybackFrame.audio.length > 0);
     await runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: websocketPlayback.mediaId,
-      stopMediaReason: "websocket_cleanup",
+      mediaId: websocketPlayback.mediaId,
     });
     const websocketLowPlaybackAudio = createWavConstantBase64(2000);
     const websocketHighPlaybackAudio = createWavConstantBase64(4000);
@@ -2445,13 +2436,11 @@ async function main() {
     assert.ok(websocketMixedPeak > 4500);
     await runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: websocketLowPlayback.mediaId,
-      stopMediaReason: "websocket_mix_cleanup",
+      mediaId: websocketLowPlayback.mediaId,
     });
     await runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: websocketHighPlayback.mediaId,
-      stopMediaReason: "websocket_mix_cleanup",
+      mediaId: websocketHighPlayback.mediaId,
     });
 
     const websocketRecording = await runtime.recordAudio(websocketAnswered.legId, {
@@ -2468,8 +2457,7 @@ async function main() {
     await sleep(30);
     const websocketRecordingStop = await runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: websocketRecording.mediaId,
-      stopMediaReason: "websocket_recording_complete",
+      mediaId: websocketRecording.mediaId,
     });
     assert.strictEqual(websocketRecordingStop.status, "interrupted");
     assert.ok(websocketRecordingStop.outputBinaryBase64);

@@ -50,11 +50,6 @@ async function loadOpenAiModelIds(context: ILoadOptionsFunctions): Promise<strin
     .filter(Boolean);
 }
 
-function normalizeGeminiModelId(raw: unknown): string {
-  const value = String(raw || "").trim();
-  return value.startsWith("models/") ? value.slice("models/".length) : value;
-}
-
 async function loadGeminiModels(context: ILoadOptionsFunctions): Promise<Array<Record<string, unknown>>> {
   const response = await requestCredentialBoundJson(
     context,
@@ -63,6 +58,11 @@ async function loadGeminiModels(context: ILoadOptionsFunctions): Promise<Array<R
     { pageSize: 1000 },
   );
   return Array.isArray(response?.models) ? response.models as Array<Record<string, unknown>> : [];
+}
+
+function normalizeGeminiModelId(raw: unknown): string {
+  const value = String(raw || "").trim();
+  return value.startsWith("models/") ? value.slice("models/".length) : value;
 }
 
 function supportsGeminiLive(model: Record<string, unknown>): boolean {
@@ -123,7 +123,7 @@ export class SipPbx {
 
   async supplyData(itemIndex: number): Promise<any> {
     const scope = this as unknown as ActionNodeScope;
-    const operation = readStringParameter(scope, "operation", itemIndex, "");
+    const operation = readStringParameter(scope, "operation", itemIndex, OPTION_DEFAULTS.common.string);
     if (operation !== "ai.invokeAiTool") {
       throw new Error(`Operation ${operation || "none"} is not usable as an AI tool`);
     }

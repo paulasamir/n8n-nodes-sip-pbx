@@ -222,7 +222,7 @@ test("Gemini Live websocket profile sends setup, maps audio output, and reports 
     },
   }), [{
     type: "interrupt",
-    reason: "voice",
+    reason: "media_voice",
     eventType: "serverContent.interrupted",
   }]);
 });
@@ -649,6 +649,6 @@ test("websocket transport drops queued OpenAI playback immediately on speech_sta
 
   assert.equal(audioEvents.length, 0);
   assert.equal(interruptEvents.length, 1);
-  assert.equal(interruptEvents[0].reason, "voice");
+  assert.equal(interruptEvents[0].reason, "media_voice");
   assert.equal(interruptEvents[0].eventType, "input_audio_buffer.speech_started");
 });

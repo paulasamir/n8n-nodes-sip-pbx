@@ -1,6 +1,5 @@
 import { ControllerClient } from "../control/controller-client";
 import { ControllerMethod, TriggerStreamKind } from "../control/controller-protocol";
-import { OPTION_DEFAULTS } from "../shared/option-defaults";
 import { TriggerStreamRegistry } from "./trigger-stream-registry";
 import type { RuntimeTriggerStream } from "./trigger-stream-registry";
 
@@ -83,7 +82,7 @@ export class PbxRuntime {
   async waitForLegEvent(legIdOrLegIds: string | string[], options?: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
       operation: "call.wait",
-      ...(Array.isArray(legIdOrLegIds) ? { legIds: legIdOrLegIds } : { legId: legIdOrLegIds }),
+      legIds: Array.isArray(legIdOrLegIds) ? legIdOrLegIds : [legIdOrLegIds],
       ...(options || {}),
     });
   }
@@ -114,14 +113,14 @@ export class PbxRuntime {
     return await this.executeAction({
       operation: "dial.break",
       dialId,
-      dialBreakReason: reason || OPTION_DEFAULTS.dial.breakReason,
+      ...(reason != null ? { dialBreakReason: reason } : {}),
     });
   }
 
   async waitForDialEvent(dialIdOrDialIds: string | string[], options?: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
       operation: "dial.wait",
-      ...(Array.isArray(dialIdOrDialIds) ? { dialIds: dialIdOrDialIds } : { dialId: dialIdOrDialIds }),
+      dialIds: Array.isArray(dialIdOrDialIds) ? dialIdOrDialIds : [dialIdOrDialIds],
       ...(options || {}),
     });
   }
@@ -129,7 +128,7 @@ export class PbxRuntime {
   async playAudio(legId: string, input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
       operation: "media.playAudio",
-      mediaLegId: legId,
+      legId,
       ...(input || {}),
     });
   }
@@ -137,7 +136,7 @@ export class PbxRuntime {
   async playTone(legId: string, input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
       operation: "media.playTone",
-      mediaLegId: legId,
+      legId,
       ...(input || {}),
     });
   }
@@ -145,7 +144,7 @@ export class PbxRuntime {
   async recordAudio(legId: string, input: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
       operation: "media.recordAudio",
-      mediaLegId: legId,
+      legId,
       ...(input || {}),
     });
   }
@@ -167,7 +166,7 @@ export class PbxRuntime {
   async sendDtmf(legId: string, digits: string, input?: Record<string, unknown>): Promise<any> {
     return await this.executeAction({
       operation: "media.sendDtmf",
-      mediaLegId: legId,
+      legId,
       dtmfDigits: digits,
       ...(input || {}),
     });
@@ -196,7 +195,6 @@ export class PbxRuntime {
       operation: "queue.putLeg",
       ref,
       legId,
-      queuePlacement: String(input?.queuePlacement || "").trim() || OPTION_DEFAULTS.queueAction.placement,
       ...(input || {}),
     });
   }

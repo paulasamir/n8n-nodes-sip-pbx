@@ -88,7 +88,6 @@ async function main() {
     const stopped = await mediaService.stopMedia({
       stopMediaTarget: "mediaId",
       stopMediaId: backgroundPlayback.mediaId,
-      stopMediaReason: "manual",
     });
     console.error("media-smoke: stopped");
     assert.strictEqual(stopped.mediaId, backgroundPlayback.mediaId);

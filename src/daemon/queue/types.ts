@@ -20,7 +20,7 @@ export type QueueEntryDialConfig = {
   callerNumber: string;
   callerName: string;
   customSipHeaders: Array<{ name: string; value: string }>;
-  extensionListOnlyFreeEndpoints: boolean;
+  extensionOnlyFreeEndpoints: boolean;
   sequentialAttemptTimeoutSeconds: number;
   sequentialGapSeconds: number;
 };

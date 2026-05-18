@@ -11,8 +11,8 @@ export class SipPbxExternal {
   displayName = "SIP Connection";
   documentationUrl = "https://github.com/siptg/n8n-nodes-sip-pbx/wiki/SIP-Connection-Credential";
   properties: UiProperty[] = [
-    { displayName: "SIP Server", name: "sipServer", type: "string", default: "", required: true, description: SIP_SERVER_HINT },
-    { displayName: "Proxy Server", name: "proxyServer", type: "string", default: "", description: PROXY_SERVER_HINT },
+    { displayName: "SIP Server", name: "sipServer", type: "string", default: OPTION_DEFAULTS.common.string, required: true, description: SIP_SERVER_HINT },
+    { displayName: "Proxy Server", name: "proxyServer", type: "string", default: OPTION_DEFAULTS.common.string, description: PROXY_SERVER_HINT },
     { displayName: "Port", name: "port", type: "number", default: OPTION_DEFAULTS.sip.port, required: true },
     {
       displayName: "Transport",
@@ -26,10 +26,10 @@ export class SipPbxExternal {
         // { name: "TLS", value: "tls" },
       ],
     },
-    { displayName: "Username", name: "username", type: "string", default: "" },
-    { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: "" },
-    { displayName: "Local Bind IP", name: "localBindIp", type: "string", default: "" },
-    { displayName: "Local Bind Port", name: "localBindPort", type: "number", default: 0 },
-    { displayName: "Public Domain", name: "publicDomain", type: "string", default: "", description: PUBLIC_DOMAIN_HINT },
+    { displayName: "Username", name: "username", type: "string", default: OPTION_DEFAULTS.common.string },
+    { displayName: "Password", name: "password", type: "string", typeOptions: { password: true }, default: OPTION_DEFAULTS.common.string },
+    { displayName: "Local Bind IP", name: "localBindIp", type: "string", default: OPTION_DEFAULTS.common.string },
+    { displayName: "Local Bind Port", name: "localBindPort", type: "number", default: OPTION_DEFAULTS.sip.localBindPort },
+    { displayName: "Public Domain", name: "publicDomain", type: "string", default: OPTION_DEFAULTS.common.string, description: PUBLIC_DOMAIN_HINT },
   ];
 }

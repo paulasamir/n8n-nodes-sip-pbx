@@ -294,7 +294,7 @@ function buildGeminiToolDeclarations(tools: WebSocketVoiceAgentToolDescriptor[])
 
 function normalizeGeminiModel(value: unknown): string {
   const model = String(value || OPTION_DEFAULTS.dial.geminiLiveModel).trim() || OPTION_DEFAULTS.dial.geminiLiveModel;
-  return model.startsWith("models/") ? model : `models/${model}`;
+  return `models/${model}`;
 }
 
 function extractGeminiAudioMimeSampleRate(mimeType: string, fallback: number): number {
@@ -436,7 +436,7 @@ export function createGeminiLiveWebSocketTransportProfile(config: Record<string,
       }
       const content = serverContent as Record<string, unknown>;
       if (content.interrupted) {
-        return [{ type: "interrupt" as const, reason: "voice", eventType: "serverContent.interrupted" }];
+        return [{ type: "interrupt" as const, reason: "media_voice", eventType: "serverContent.interrupted" }];
       }
       const modelTurn = content.modelTurn;
       if (!modelTurn || typeof modelTurn !== "object") {

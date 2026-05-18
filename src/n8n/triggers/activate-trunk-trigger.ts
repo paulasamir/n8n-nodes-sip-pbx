@@ -15,10 +15,25 @@ import {
   type TrunkTriggerBranch,
 } from "../../shared/branches";
 import { readCredentialsParameter } from "../shared/credential-loading";
-import { readCollectionOptions, readHeaderLinesFromCollectionOptions, readStringParameter } from "../shared/input-normalization";
+import {
+  readHeaderLinesFromCollectionOptions,
+  readOptions,
+  readStringParameter,
+} from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem, normalizePublicRawObject } from "../shared/output-builders";
 import { extractSipDisplayName, extractSipUser } from "../shared/sip-address";
 import { readSharedAuthTriggerConfig } from "./shared-auth-trigger";
+import { normalizeSipAudioCodecFilters, normalizeSipDtmfMethodFilters } from "../../shared/sip-media-filters";
+
+function normalizeSipAudioCodecFiltersOrDefault(value: unknown): string[] {
+  const normalized = normalizeSipAudioCodecFilters(value);
+  return normalized.length > 0 ? normalized : [...OPTION_DEFAULTS.sipMedia.codecs];
+}
+
+function normalizeSipDtmfMethodFiltersOrDefault(value: unknown): string[] {
+  const normalized = normalizeSipDtmfMethodFilters(value);
+  return normalized.length > 0 ? normalized : [...OPTION_DEFAULTS.sipMedia.dtmfMethods];
+}
 
 function optionalNumber(value: unknown, fallback: number): number {
   if (value == null || value === "") {
@@ -38,7 +53,7 @@ function pickFirst(...sources: unknown[]): unknown {
 }
 
 export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Promise<any> {
-  const ref = readStringParameter(node, "ref", 0, "");
+  const ref = readStringParameter(node, "ref", 0, OPTION_DEFAULTS.common.string);
   if (!ref) {
     throw new Error("Trigger ref is required");
   }
@@ -53,11 +68,10 @@ export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Prom
     ? Boolean(node.getNodeParameter?.("trunkUseRegistration", 0, OPTION_DEFAULTS.trigger.trunk.useRegistration))
     : false;
   const enableCallRecording = Boolean(node.getNodeParameter?.("enableCallRecording", 0, OPTION_DEFAULTS.trigger.trunk.enableCallRecording));
-  const options = readCollectionOptions(node, "trunkOptions", 0);
+  const options = readOptions(node, 0);
   const authConfig = trunkConnectionMode === TRUNK_CONNECTION_MODE_DYNAMIC
     ? readSharedAuthTriggerConfig(node, 0, {
       kind: "trunk",
-      optionsName: "trunkOptions",
       authModeName: "authMode",
       staticUsernameName: "trunkStaticUsername",
       staticPasswordName: "trunkStaticPassword",
@@ -88,6 +102,8 @@ export async function activateTrunkTrigger(node: any, runtime: PbxRuntime): Prom
     })(),
     tlsBindPort: optionalNumber(pickFirst(options.tlsBindPort), OPTION_DEFAULTS.sip.tlsPort),
     advertisedIp: String(pickFirst(options.advertisedIp, credentials.publicDomain) || "").trim(),
+    codecs: normalizeSipAudioCodecFiltersOrDefault(options.codecs),
+    dtmfMethods: normalizeSipDtmfMethodFiltersOrDefault(options.dtmfMethods),
   };
   if (sipCredentials) {
     config.sipCredentials = sipCredentials;

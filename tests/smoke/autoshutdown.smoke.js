@@ -58,7 +58,7 @@ async function runScenario(name, order) {
   assert.strictEqual(rpcTone.status, "started");
 
   const rpcWaitPromise = runtime.waitMedia({
-    waitMediaIds: [rpcTone.mediaId],
+    mediaIds: [rpcTone.mediaId],
     waitMediaTimeoutSeconds: 10,
   });
 
@@ -71,8 +71,7 @@ async function runScenario(name, order) {
     async rpc() {
       await runtime.stopMedia({
         stopMediaTarget: "mediaId",
-        stopMediaId: rpcTone.mediaId,
-        stopMediaReason: `autoshutdown_${name}`,
+        mediaId: rpcTone.mediaId,
       });
       const result = await rpcWaitPromise;
       assert.ok(result);
@@ -94,8 +93,7 @@ async function runScenario(name, order) {
     triggerStream.close(),
     runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: rpcTone.mediaId,
-      stopMediaReason: `autoshutdown_${name}_cleanup`,
+      mediaId: rpcTone.mediaId,
     }),
     runtime.hangup(callLeg.legId),
     runtime.hangup(rpcLeg.legId),

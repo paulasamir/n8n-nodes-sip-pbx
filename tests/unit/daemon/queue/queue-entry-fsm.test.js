@@ -30,7 +30,7 @@ function makeEntry(overrides = {}) {
       callerNumber: "",
       callerName: "",
       customSipHeaders: [],
-      extensionListOnlyFreeEndpoints: true,
+      extensionOnlyFreeEndpoints: true,
       sequentialAttemptTimeoutSeconds: 30,
       sequentialGapSeconds: 1,
     },

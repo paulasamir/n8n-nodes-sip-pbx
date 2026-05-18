@@ -1,43 +1,43 @@
 import type { PbxRuntime } from "../../runtime/pbx-runtime";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
-import { normalizeExtensionDialConfig, readBooleanParameter, readCollectionOptions, readStringParameter, requireActionValue } from "../shared/input-normalization";
+import { normalizeExtensionDialConfig, readBooleanParameter, readOptions, readStringParameter, requireActionValue } from "../shared/input-normalization";
 import { resolveLegId } from "../shared/id-resolution";
 
 export async function executeEnqueueLeg(node: any, runtime: PbxRuntime, item: any, index: number): Promise<any> {
-  const queueOptions = readCollectionOptions(node, "queueOptions", index);
-  const legId = requireActionValue("legId", resolveLegId(node, item, index, "legId", "queueOptions"));
+  const options = readOptions(node, index);
+  const legId = requireActionValue("legId", resolveLegId(node, item, index));
   const ref =
-    readStringParameter(node, "ref", index, "")
+    readStringParameter(node, "ref", index, OPTION_DEFAULTS.common.string)
     || String((item?.json && item.json.ref) || (item?.json?.sipPbx && item.json.sipPbx.ref) || "").trim();
   const extensionDialConfig = normalizeExtensionDialConfig({
     extensionNumbers: [],
-    callStrategy: queueOptions.callStrategy ?? OPTION_DEFAULTS.dial.strategy,
-    sequentialAttemptTimeoutSeconds: queueOptions.sequentialAttemptTimeoutSeconds ?? OPTION_DEFAULTS.dial.sequentialAttemptTimeoutSeconds,
-    sequentialGapSeconds: queueOptions.sequentialGapSeconds ?? OPTION_DEFAULTS.dial.sequentialGapSeconds,
+    callStrategy: options.callStrategy ?? OPTION_DEFAULTS.dial.strategy,
+    sequentialAttemptTimeoutSeconds: options.sequentialAttemptTimeoutSeconds ?? OPTION_DEFAULTS.dial.sequentialAttemptTimeoutSeconds,
+    sequentialGapSeconds: options.sequentialGapSeconds ?? OPTION_DEFAULTS.dial.sequentialGapSeconds,
     options: {
-      ...queueOptions,
-      extensionListOnlyFreeEndpoints: true,
+      ...options,
+      extensionOnlyFreeEndpoints: true,
     },
-    extensionListOnlyFreeEndpointsDefault: true,
+    extensionOnlyFreeEndpointsDefault: true,
   });
-  const rejoinExisting = queueOptions.rejoinExisting == null
-    ? true
-    : Boolean(queueOptions.rejoinExisting);
-  const retryAttempts = queueOptions.retryAttempts == null
+  const rejoinExisting = options.rejoinExisting == null
+    ? OPTION_DEFAULTS.queueAction.rejoinExisting
+    : Boolean(options.rejoinExisting);
+  const retryAttempts = options.retryAttempts == null
     ? OPTION_DEFAULTS.trigger.queue.retryAttempts
-    : Number(queueOptions.retryAttempts);
-  const retryPauseSeconds = queueOptions.retryPauseSeconds == null
+    : Number(options.retryAttempts);
+  const retryPauseSeconds = options.retryPauseSeconds == null
     ? OPTION_DEFAULTS.trigger.queue.retryPauseSeconds
-    : Number(queueOptions.retryPauseSeconds);
+    : Number(options.retryPauseSeconds);
   return await runtime.enqueueLeg(requireActionValue("ref", ref), legId, {
-    queuePlacement: (String(queueOptions.queuePlacement || "").trim() || readStringParameter(node, "queuePlacement", index, OPTION_DEFAULTS.queueAction.placement)) as "front" | "back",
+    queuePlacement: (String(options.queuePlacement || "").trim() || readStringParameter(node, "queuePlacement", index, OPTION_DEFAULTS.queueAction.placement)) as "front" | "back",
     callStrategy: extensionDialConfig.callStrategy,
     callerNumber: extensionDialConfig.callerNumber,
     callerName: extensionDialConfig.callerName,
     customSipHeaders: extensionDialConfig.customSipHeaders,
     sequentialAttemptTimeoutSeconds: extensionDialConfig.sequentialAttemptTimeoutSeconds,
     sequentialGapSeconds: extensionDialConfig.sequentialGapSeconds,
-    extensionListOnlyFreeEndpoints: true,
+    extensionOnlyFreeEndpoints: true,
     rejoinExisting,
     retryAttempts,
     retryPauseSeconds,
@@ -45,9 +45,9 @@ export async function executeEnqueueLeg(node: any, runtime: PbxRuntime, item: an
 }
 
 export async function executeSetQueueCallback(node: any, runtime: PbxRuntime, item: any, index: number): Promise<any> {
-  const callbackEnabled = readBooleanParameter(node, "callbackEnabled", index, true);
+  const callbackEnabled = readBooleanParameter(node, "callbackEnabled", index, OPTION_DEFAULTS.queueAction.callbackEnabled);
   return await runtime.setQueueCallback(
-    requireActionValue("legId", resolveLegId(node, item, index, "legId", "queueOptions")),
+    requireActionValue("legId", resolveLegId(node, item, index)),
     callbackEnabled,
   );
 }
@@ -55,11 +55,11 @@ export async function executeSetQueueCallback(node: any, runtime: PbxRuntime, it
 export async function executeGetQueueStats(node: any, runtime: PbxRuntime, item: any, index: number): Promise<any> {
   const target = readStringParameter(node, "queueStatsTarget", index, OPTION_DEFAULTS.queueAction.statsTarget);
   const ref =
-    readStringParameter(node, "ref", index, "")
+    readStringParameter(node, "ref", index, OPTION_DEFAULTS.common.string)
     || String((item?.json && item.json.ref) || (item?.json?.sipPbx && item.json.sipPbx.ref) || "").trim();
   return await runtime.getQueueStats({
     queueStatsTarget: target,
     ref,
-    legId: resolveLegId(node, item, index, "legId", "queueOptions"),
+    legId: resolveLegId(node, item, index),
   });
 }

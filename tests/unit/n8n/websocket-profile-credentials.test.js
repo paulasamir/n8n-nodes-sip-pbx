@@ -310,7 +310,7 @@ test("Make Call forwards websocketStartMode for websocket dials", async () => {
       if (name === "callMode") return "websocket";
       if (name === "transportProfile") return "openai_realtime";
       if (name === "websocketStartMode") return "deferred";
-      if (name === "dialOptions") {
+      if (name === "options") {
         return {
           openaiRealtimeInputTranscriptionModel: "gpt-realtime-whisper",
         };
@@ -441,7 +441,7 @@ test("Attach Voice Agent opens voiceAgent stream with memory and tools and handl
     assert.deepStrictEqual(capturedStreamConfig, {
       legId: "ws-leg-1",
       hasConnectedMemory: true,
-      memoryText: "User: Caller says they are premium.\nAssistant: Acknowledge premium support routing.",
+      memoryText: "Human: Caller says they are premium.\nAi: Acknowledge premium support routing.",
       needsInputTranscription: true,
       tools: [{
         name: "lookup_order",
@@ -577,7 +577,7 @@ test("AI actions expose optional AI Leg ID in Add Option collection", async () =
 
   const property = buildActionNodeProperties().find((entry) =>
     entry
-    && entry.name === "aiOptions"
+    && entry.name === "options"
     && entry.displayOptions
     && entry.displayOptions.show
     && Array.isArray(entry.displayOptions.show.operation)
@@ -901,26 +901,33 @@ test("extension dial options use distinct child property objects from trunk/dire
   const { buildActionNodeProperties } = require("../../../build-src/n8n/ui/action-properties.js");
 
   const actionProperties = buildActionNodeProperties();
-  const trunkDirectDialOptions = actionProperties.find((entry) =>
+  const trunkDialOptions = actionProperties.find((entry) =>
     entry
-    && entry.name === "dialOptions"
+    && entry.name === "options"
     && entry.displayOptions?.show
     && Array.isArray(entry.displayOptions.show.callMode)
-    && entry.displayOptions.show.callMode.length === 2
-    && entry.displayOptions.show.callMode.includes("trunk")
-    && entry.displayOptions.show.callMode.includes("direct"));
+    && entry.displayOptions.show.callMode.length === 1
+    && entry.displayOptions.show.callMode[0] === "trunk");
+  const directDialOptions = actionProperties.find((entry) =>
+    entry
+    && entry.name === "options"
+    && entry.displayOptions?.show
+    && Array.isArray(entry.displayOptions.show.callMode)
+    && entry.displayOptions.show.callMode.length === 1
+    && entry.displayOptions.show.callMode[0] === "direct");
   const extensionDialOptions = actionProperties.find((entry) =>
     entry
-    && entry.name === "dialOptions"
+    && entry.name === "options"
     && entry.displayOptions?.show
     && Array.isArray(entry.displayOptions.show.callMode)
     && entry.displayOptions.show.callMode.length === 1
     && entry.displayOptions.show.callMode[0] === "extension");
 
-  assert.ok(trunkDirectDialOptions);
+  assert.ok(trunkDialOptions);
+  assert.ok(directDialOptions);
   assert.ok(extensionDialOptions);
-  assert.notStrictEqual(trunkDirectDialOptions.options, extensionDialOptions.options);
-  assert.notStrictEqual(trunkDirectDialOptions.options[0], extensionDialOptions.options[0]);
-  assert.notStrictEqual(trunkDirectDialOptions.options[1], extensionDialOptions.options[1]);
-  assert.notStrictEqual(trunkDirectDialOptions.options[2], extensionDialOptions.options[2]);
+  assert.notStrictEqual(trunkDialOptions.options, extensionDialOptions.options);
+  assert.notStrictEqual(directDialOptions.options, extensionDialOptions.options);
+  assert.notStrictEqual(trunkDialOptions.options[0], extensionDialOptions.options[0]);
+  assert.notStrictEqual(directDialOptions.options[0], extensionDialOptions.options[0]);
 });

@@ -1,4 +1,5 @@
 import { getPbxRuntime } from "../../runtime/runtime-factory";
+import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { createSipPbxTriggerDescription } from "../ui/trigger-description";
 import { activateAiToolTrigger } from "../triggers/activate-ai-tool-trigger";
 import { activateExtensionsTrigger } from "../triggers/activate-extensions-trigger";
@@ -20,7 +21,7 @@ export class SipPbxTrigger {
   async trigger(): Promise<any> {
     const scope = this as unknown as TriggerNodeScope;
     const runtime = getPbxRuntime(scope);
-    const triggerOn = readStringParameter(scope, "triggerOn", 0, "");
+    const triggerOn = readStringParameter(scope, "triggerOn", 0, OPTION_DEFAULTS.common.string);
     try {
       if (triggerOn === "aiTool") {
         return await activateAiToolTrigger(scope, runtime);

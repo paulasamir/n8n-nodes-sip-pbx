@@ -14,6 +14,17 @@ import { createTransport } from "../../transports/media-transport";
 import { RtpTransport, type RtpTransportConfig } from "../../transports/rtp-transport";
 import { WebSocketTransport } from "../../transports/websocket-transport";
 import { OPTION_DEFAULTS } from "../../../../shared/option-defaults";
+import {
+  SIP_AUDIO_CODEC_ALAW,
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_G729,
+  SIP_AUDIO_CODEC_MULAW,
+  SIP_AUDIO_CODEC_OPUS,
+  type SipAudioCodecFilter,
+  type SipDtmfMethodFilter,
+  normalizeSipAudioCodecFilters,
+  normalizeSipDtmfMethodFilters,
+} from "../../../../shared/sip-media-filters";
 import type { BufferReleasePool } from "../../streams/media-stream";
 import { Mixer } from "./mixer";
 import type { Bridge } from "./bridge";
@@ -432,6 +443,8 @@ function buildRtpTransportConfig(details: Record<string, unknown>): RtpTransport
       ? details.payloadTypes.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
       : undefined,
     payloadCodecs: normalizePayloadCodecs(details.payloadCodecs),
+    allowedAudioCodecs: normalizeSipAudioCodecFilters(details.allowedAudioCodecs),
+    allowedDtmfMethods: normalizeSipDtmfMethodFilters(details.allowedDtmfMethods),
     currentSequenceNumber: Number.isInteger(Number(details.currentSequenceNumber))
       ? Number(details.currentSequenceNumber)
       : undefined,
@@ -456,25 +469,44 @@ function resolveCodecNameForTransport(
   if (explicit) {
     return mapDescriptorNameToAudioCodecName(explicit);
   }
+  const allowedAudioCodecs = normalizeSipAudioCodecFilters(config.allowedAudioCodecs);
   const payloadCodecs = normalizePayloadCodecs(config.payloadCodecs);
   const audioPayloadType = Number(config.audioPayloadType);
   if (Number.isInteger(audioPayloadType) && audioPayloadType >= 0) {
     const descriptor = resolveAudioCodecForPayloadType(audioPayloadType, payloadCodecs);
-    if (descriptor) {
+    if (descriptor && isAllowedAudioCodecDescriptor(descriptor.name, allowedAudioCodecs)) {
       return mapDescriptorNameToAudioCodecName(descriptor.name);
     }
   }
   const payloadTypes = Array.isArray(config.payloadTypes)
     ? config.payloadTypes.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
     : [];
-  if (payloadTypes.length > 0) {
-    const preferredPayloadType = pickPreferredAudioPayloadType(payloadTypes, payloadCodecs);
+  const allowedPayloadTypes = payloadTypes.filter((payloadType) => {
+    const descriptor = resolveAudioCodecForPayloadType(payloadType, payloadCodecs);
+    return descriptor ? isAllowedAudioCodecDescriptor(descriptor.name, allowedAudioCodecs) : false;
+  });
+  if (allowedPayloadTypes.length > 0) {
+    const preferredPayloadType = pickPreferredAudioPayloadType(allowedPayloadTypes, payloadCodecs);
     const descriptor = resolveAudioCodecForPayloadType(preferredPayloadType, payloadCodecs);
     if (descriptor) {
       return mapDescriptorNameToAudioCodecName(descriptor.name);
     }
   }
   return fallback;
+}
+
+function isAllowedAudioCodecDescriptor(descriptorName: string, allowedAudioCodecs: readonly SipAudioCodecFilter[]): boolean {
+  if (!allowedAudioCodecs.length) {
+    return true;
+  }
+  const codecName = String(descriptorName || "").trim().toLowerCase();
+  return (
+    (codecName === "pcma" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_ALAW))
+    || (codecName === "pcmu" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_MULAW))
+    || (codecName === "g722" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_G722))
+    || (codecName === "g729" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_G729))
+    || (codecName === "opus" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_OPUS))
+  );
 }
 
 function createRepeatingWorkerTicker(
@@ -1012,7 +1044,7 @@ export class Leg {
       return;
     }
     if (event.type === "interrupt") {
-      if (event.reason === "voice") {
+      if (event.reason === "media_voice") {
         emitLegEvent(this.onVoiceActivity, this.legId, 1, 100);
       }
       return;
@@ -1668,7 +1700,7 @@ export class Leg {
     recording.silenceActiveDurationMs = Math.max(0, now - recording.silenceLastActiveAtMs);
     if (recording.silenceActiveDurationMs >= Math.max(0, recording.silenceDurationMs)) {
       recording.silenceInterrupted = true;
-      emitLegEvent(this.onRecordingInterrupt, this.legId, recording.mediaId, "silence", {
+      emitLegEvent(this.onRecordingInterrupt, this.legId, recording.mediaId, "media_silence", {
         silenceLevel: frame.level,
         silenceDurationMs: recording.silenceActiveDurationMs,
         silenceThreshold: recording.silenceThreshold,
@@ -1686,7 +1718,7 @@ export class Leg {
       return;
     }
     recording.silenceInterrupted = true;
-    emitLegEvent(this.onRecordingInterrupt, this.legId, recording.mediaId, "silence", {
+    emitLegEvent(this.onRecordingInterrupt, this.legId, recording.mediaId, "media_silence", {
       silenceLevel: 0,
       silenceDurationMs: recording.silenceActiveDurationMs,
       silenceThreshold: recording.silenceThreshold,

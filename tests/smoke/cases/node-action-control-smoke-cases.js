@@ -3,6 +3,14 @@
 
 const assert = require("assert");
 const {
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_OPUS,
+  SIP_DTMF_METHOD_INFO,
+} = require("../../../build-src/shared/sip-media-filters.js");
+const {
+  INTERRUPT_REASON_CALL_BRIDGE_JOINED,
+} = require("../../../build-src/shared/interrupt-reasons.js");
+const {
   sipPbxNodeModulePath,
   createExecuteContext,
   withPatchedRuntime,
@@ -30,7 +38,10 @@ async function testCallWaitForEventRouting() {
     Object.assign(node, createExecuteContext({
       operation: "call.wait",
       timeoutSeconds: 20,
-      callOptions: { interdigitTimeoutSeconds: 0.8 },
+      options: {
+        interdigitTimeoutSeconds: 0.8,
+        interruptReasons: [INTERRUPT_REASON_CALL_BRIDGE_JOINED],
+      },
       waitDtmfFallbackEnabled: true,
       waitDtmfMultiDigitFallbackEnabled: true,
       dtmfTerminatorDigit: "#",
@@ -51,6 +62,7 @@ async function testCallWaitForEventRouting() {
 
   assert.strictEqual(seen.legId, "leg-call-1");
   assert.strictEqual(seen.options.rules.length, 2);
+  assert.deepStrictEqual(seen.options.interruptReasons, [INTERRUPT_REASON_CALL_BRIDGE_JOINED]);
   return { matchedRuleCount: seen.options.rules.length };
 }
 
@@ -75,6 +87,7 @@ async function testCallWaitForEventRoutingMultipleLegs() {
       operation: "call.wait",
       legIds: { item: [{ legId: "leg-call-1" }, { legId: "leg-call-2" }] },
       timeoutSeconds: 20,
+      options: { interruptReasons: [] },
       rules: {
         item: [
           { pattern: "123", label: "Sales" },
@@ -87,20 +100,24 @@ async function testCallWaitForEventRoutingMultipleLegs() {
   });
 
   assert.deepStrictEqual(seen.legIds, ["leg-call-1", "leg-call-2"]);
+  assert.deepStrictEqual(seen.options.interruptReasons, []);
   return { legCount: seen.legIds.length };
 }
 
 async function testDialWaitForEventRouting() {
   const fakeRuntime = {
-    async waitForDialEvent(dialId, options) {
+    async waitForDialEvent(dialIds, options) {
       assert.deepStrictEqual(options.waitEventOutputs, ["ringing", "rejected"]);
       assert.strictEqual(options.legId, "leg-retained-1");
+      assert.strictEqual(options.interruptOnDtmf, true);
       return {
-        eventType: "rejected",
-        dialId,
+        eventType: "interrupted",
+        dialId: Array.isArray(dialIds) ? dialIds[0] : dialIds,
         legId: "leg-attempt-1",
         stillDialingLegCount: 1,
-        reason: "busy",
+        interruptReason: "call_dtmf",
+        digit: "5",
+        digits: "56",
       };
     },
   };
@@ -113,12 +130,16 @@ async function testDialWaitForEventRouting() {
       legId: "leg-retained-1",
       dialTimeoutSeconds: 15,
       waitEventOutputs: [["ringing", "rejected"]],
+      interruptOn: [["dtmf"]],
     }, [{ json: { dialId: "dial-1" } }]));
     const outputs = await node.execute();
-    assert.strictEqual(outputs.length, 5);
-    assert.strictEqual(outputs[1][0].json.dialId, "dial-1");
-    assert.strictEqual(outputs[1][0].json.legId, "leg-attempt-1");
-    assert.strictEqual(outputs[1][0].json.stillDialingLegCount, 1);
+    assert.strictEqual(outputs.length, 6);
+    assert.strictEqual(outputs[2][0].json.dialId, "dial-1");
+    assert.strictEqual(outputs[2][0].json.legId, "leg-attempt-1");
+    assert.strictEqual(outputs[2][0].json.stillDialingLegCount, 1);
+    assert.strictEqual(outputs[2][0].json.interruptReason, "call_dtmf");
+    assert.strictEqual(outputs[2][0].json.digit, "5");
+    assert.strictEqual(outputs[2][0].json.digits, "56");
   });
 
   return { ok: true };
@@ -147,6 +168,7 @@ async function testDialWaitForEventRoutingMultipleDials() {
       dialIds: { item: [{ dialId: "dial-1" }, { dialId: "dial-2" }] },
       dialTimeoutSeconds: 15,
       waitEventOutputs: [["ringing"]],
+      interruptOn: [[]],
     }, [{ json: {} }]));
     const outputs = await node.execute();
     assert.strictEqual(outputs[1][0].json.dialId, "dial-2");
@@ -218,7 +240,7 @@ async function testQueueAndAuthResponses() {
     Object.assign(authExplicitNode, createExecuteContext({
       resource: "respond",
       operation: "respond.toAuth",
-      respondOptions: { requestId: "auth-explicit" },
+      options: { requestId: "auth-explicit" },
       authAction: "allow",
       extension: "",
     }, [{ json: { username: "100" } }]));
@@ -229,7 +251,7 @@ async function testQueueAndAuthResponses() {
     Object.assign(recordNode, createExecuteContext({
       resource: "respond",
       operation: "respond.toRecord",
-      respondOptions: { requestId: "record-explicit" },
+      options: { requestId: "record-explicit" },
       active: false,
     }, [{ json: {} }]));
     const recordOutputs = await recordNode.execute();
@@ -239,7 +261,7 @@ async function testQueueAndAuthResponses() {
     Object.assign(recordWaitNode, createExecuteContext({
       resource: "respond",
       operation: "respond.toRecord",
-      respondOptions: { requestId: "record-wait", recordWavSampleRate: 8000, recordWavBitDepth: 16 },
+      options: { requestId: "record-wait", recordWavSampleRate: 8000, recordWavBitDepth: 16 },
       active: true,
       recordFilePath: "recordings/call.wav",
       recordFileFormat: "wav",
@@ -260,7 +282,7 @@ async function testQueueAndAuthResponses() {
       recordFileFormat: "wav",
       recordSplitChannels: true,
       waitForRecordingCompletion: true,
-      recordingOptions: { legId: "leg-record-direct", recordWavSampleRate: 16000, recordWavBitDepth: 16 },
+      options: { legId: "leg-record-direct", recordWavSampleRate: 16000, recordWavBitDepth: 16 },
     }, [{ json: {} }]));
     const directRecordOutputs = await directRecordNode.execute();
     assert.strictEqual(directRecordOutputs[0][0].json.legId, "leg-record-direct");
@@ -272,7 +294,7 @@ async function testQueueAndAuthResponses() {
       resource: "queue",
       operation: "queue.getStats",
       queueStatsTarget: "legId",
-      queueOptions: { legId: "leg-queue-1" },
+      options: { legId: "leg-queue-1" },
     }, [{ json: {} }]));
     const statsOutputs = await statsNode.execute();
     assert.strictEqual(statsOutputs[0][0].json.position, 1);
@@ -354,7 +376,7 @@ async function testDialMakeAndBridge() {
       callMode: "extension",
       callStrategy: "parallel",
       extensionNumbers: "100, 101",
-      dialOptions: {
+      options: {
         callerNumber: "+1000000",
         callerName: "Alice",
       },
@@ -370,7 +392,7 @@ async function testDialMakeAndBridge() {
       callMode: "extension",
       callStrategy: "parallel",
       extensionNumbers: "999",
-      dialOptions: {
+      options: {
         callerNumber: "+1999000",
       },
     }, [{ json: {} }]));
@@ -386,7 +408,7 @@ async function testDialMakeAndBridge() {
       callMode: "extension",
       callStrategy: "parallel",
       extensionNumbers: "999",
-      dialOptions: {},
+      options: {},
     }, [{ json: {} }]));
     fakeRuntime.makeDial = async () => {
       const error = new Error("Extension dial requires active registrations");
@@ -418,7 +440,9 @@ async function testDialMakeAndBridge() {
       callMode: "direct",
       callStrategy: "parallel",
       destination: "200",
-      dialOptions: {
+      options: {
+        codecs: [SIP_AUDIO_CODEC_G722, SIP_AUDIO_CODEC_OPUS],
+        dtmfMethods: [SIP_DTMF_METHOD_INFO],
         callerNumber: "+2000000",
         callerName: "Bob",
       },
@@ -444,7 +468,7 @@ async function testDialMakeAndBridge() {
       operation: "dial.make",
       callMode: "websocket",
       transportProfile: "openai_realtime",
-      dialOptions: {
+      options: {
         openaiRealtimeModel: "gpt-realtime-test",
         openaiRealtimeVoice: "verse",
         openaiRealtimeInputTranscriptionModel: "gpt-realtime-whisper",
@@ -466,7 +490,7 @@ async function testDialMakeAndBridge() {
       operation: "call.bridge",
       legAId: "leg-a",
       legBId: "leg-b",
-      callOptions: {
+      options: {
         emitDtmfEvents: true,
         relayDtmf: "auto",
       },
@@ -480,7 +504,7 @@ async function testDialMakeAndBridge() {
     Object.assign(unbridgeNode, createExecuteContext({
       resource: "call",
       operation: "call.unbridge",
-      callOptions: { legId: "leg-a" },
+      options: { legId: "leg-a" },
     }, [{ json: {} }]));
     const unbridgeOutputs = await unbridgeNode.execute();
     assert.strictEqual(unbridgeOutputs[0][0].json.legId, "leg-a");
@@ -488,10 +512,12 @@ async function testDialMakeAndBridge() {
   });
 
   assert.deepStrictEqual(seen.makeDial[0].extensionNumbers, ["100", "101"]);
-  assert.strictEqual(seen.makeDial[0].extensionListOnlyFreeEndpoints, true);
+  assert.strictEqual(seen.makeDial[0].extensionOnlyFreeEndpoints, true);
   assert.strictEqual(seen.makeDial[0].ref, undefined);
   assert.strictEqual(seen.makeDial[1].sipCredentials.username, "alice");
   assert.strictEqual(seen.makeDial[1].sipCredentials.transport, "udp");
+  assert.deepStrictEqual(seen.makeDial[1].codecs, [SIP_AUDIO_CODEC_G722, SIP_AUDIO_CODEC_OPUS]);
+  assert.deepStrictEqual(seen.makeDial[1].dtmfMethods, [SIP_DTMF_METHOD_INFO]);
   assert.strictEqual(seen.makeDial[2].openaiRealtimeModel, "gpt-realtime-test");
   assert.strictEqual(seen.makeDial[2].openaiRealtimeVoice, "verse");
   assert.strictEqual(seen.makeDial[2].openaiRealtimeInputTranscriptionModel, "gpt-realtime-whisper");
@@ -514,7 +540,7 @@ async function testOperationOnlyAnswerRouting() {
     const node = new SipPbx();
     Object.assign(node, createExecuteContext({
       operation: "call.answer",
-      callOptions: { legId: "leg-answer-1" },
+      options: { legId: "leg-answer-1" },
     }, [{ json: {} }]));
     const outputs = await node.execute();
     assert.strictEqual(outputs[0][0].json.legId, "leg-answer-1");
@@ -580,18 +606,16 @@ async function testActionOperationContract() {
       respondOperationProperty.options.some((option) => option.value === "respond.toRecord" && option.name === "Respond to recording"),
       "respond recording operation label should be updated",
     );
-    for (const name of ["callOptions", "dialOptions", "mediaOptions", "respondOptions", "queueOptions", "recordingOptions", "aiOptions"]) {
-      const matching = properties.filter((property) => property.name === name);
-      assert.ok(matching.length > 0, `missing property: ${name}`);
-      for (const property of matching) {
-        assert.strictEqual(property.displayName, "Options");
-        assert.strictEqual(property.type, "collection");
-        assert.strictEqual(property.placeholder, "Add Option");
-        assert.strictEqual(property.typeOptions, undefined);
-        assert.ok(property.options.length >= 1, `${name} should have option fields`);
-        for (const option of property.options) {
-          assert.notStrictEqual(option.required, true, `${name}.${option.name} should be an optional override`);
-        }
+    const optionCollections = properties.filter((property) => property.name === "options");
+    assert.ok(optionCollections.length > 0, "missing property: options");
+    for (const property of optionCollections) {
+      assert.strictEqual(property.displayName, "Options");
+      assert.strictEqual(property.type, "collection");
+      assert.strictEqual(property.placeholder, "Add Option");
+      assert.strictEqual(property.typeOptions, undefined);
+      assert.ok(property.options.length >= 1, "options should have option fields");
+      for (const option of property.options) {
+        assert.notStrictEqual(option.required, true, `options.${option.name} should be an optional override`);
       }
     }
     const extensionRefProperty = properties.find((property) => property.name === "ref" && property.displayOptions?.show?.resource?.includes("dial") && property.displayOptions?.show?.callMode?.includes("extension"));
@@ -600,7 +624,7 @@ async function testActionOperationContract() {
     assert.ok(extensionNumbersProperty.description.includes("across all extensions refs in the current flow"), "extension list hint should explain flow-local cross-ref dialing");
     assert.ok(extensionNumbersProperty.description.includes("matching endpoint"), "extension list hint should explain endpoint-level dialing");
     assert.strictEqual(propertyByName.get("openaiRealtimeOptions"), undefined, "openaiRealtimeOptions should not exist");
-    for (const name of ["legIdOptions", "dialIdOptions", "mediaLegIdOptions", "requestIdOptions", "stopMediaIdOptions", "stopMediaLegIdOptions"]) {
+    for (const name of ["legIdOptions", "dialIdOptions", "requestIdOptions"]) {
       assert.strictEqual(propertyByName.get(name), undefined, `${name} should not exist`);
     }
     for (const name of ["callMode", "destination", "extensionNumbers", "transportProfile", "sourceType", "recordOutputType", "stopMediaTarget", "queueStatsTarget", "authAction", "legAId", "legBId"]) {
@@ -608,8 +632,8 @@ async function testActionOperationContract() {
       assert.ok(property, `missing property: ${name}`);
       assert.strictEqual(property.required, true, `${name} should be required`);
     }
-    const sendDtmfOptionsIndex = properties.findIndex((property) => property.name === "mediaOptions" && property.displayOptions?.show?.operation?.includes("media.sendDtmf"));
-    assert.ok(sendDtmfOptionsIndex >= 0, "missing mediaOptions for sendDtmf");
+    const sendDtmfOptionsIndex = properties.findIndex((property) => property.name === "options" && property.displayOptions?.show?.operation?.includes("media.sendDtmf"));
+    assert.ok(sendDtmfOptionsIndex >= 0, "missing options for sendDtmf");
     const queueTargetIndex = properties.findIndex((property) => property.name === "queueStatsTarget");
     const queueRefIndex = properties.findIndex((property) => property.name === "ref" && property.displayOptions?.show?.resource?.includes("queue") && property.displayOptions?.show?.operation?.includes("queue.getStats"));
     assert.ok(queueTargetIndex >= 0, "missing queueStatsTarget");
@@ -623,23 +647,23 @@ async function testActionOperationContract() {
     assert.ok(queueRefProperty, "missing queue ref property");
     assert.strictEqual(queueRefProperty.displayName, "Queue Ref");
     assert.strictEqual(queueRefProperty.required, true, "queue ref should be required");
-    const dialOptionCollections = properties.filter((property) => property.name === "dialOptions");
+    const dialOptionCollections = properties.filter((property) => property.name === "options");
     const makeSipDialOptions = dialOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("dial.make") && property.displayOptions?.show?.callMode?.includes("trunk"));
     const breakDialOptions = dialOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("dial.break"));
     const openAiDialOptions = dialOptionCollections.find((property) => property.displayOptions?.show?.transportProfile?.includes("openai_realtime"));
     const geminiDialOptions = dialOptionCollections.find((property) => property.displayOptions?.show?.transportProfile?.includes("gemini_live"));
     const genericDialOptions = dialOptionCollections.find((property) => property.displayOptions?.show?.transportProfile?.includes("generic"));
     const websocketStartModeProperty = propertyByName.get("websocketStartMode");
-    assert.ok(makeSipDialOptions, "missing dial.make SIP dialOptions");
-    assert.ok(breakDialOptions, "missing dial.break dialOptions");
-    assert.ok(openAiDialOptions, "missing OpenAI dialOptions");
-    assert.ok(geminiDialOptions, "missing Gemini dialOptions");
-    assert.ok(genericDialOptions, "missing generic dialOptions");
+    assert.ok(makeSipDialOptions, "missing dial.make SIP options");
+    assert.ok(breakDialOptions, "missing dial.break options");
+    assert.ok(openAiDialOptions, "missing OpenAI options");
+    assert.ok(geminiDialOptions, "missing Gemini options");
+    assert.ok(genericDialOptions, "missing generic options");
     assert.deepStrictEqual(websocketStartModeProperty.displayOptions.show.transportProfile, ["openai_realtime", "gemini_live"]);
     assert.ok(makeSipDialOptions.options.some((option) => option.name === "callerNumber"));
     assert.ok(makeSipDialOptions.options.some((option) => option.name === "callerName"));
     assert.ok(makeSipDialOptions.options.some((option) => option.name === "customSipHeaders"));
-    const freeEndpointsOption = makeSipDialOptions.options.find((option) => option.name === "extensionListOnlyFreeEndpoints");
+    const freeEndpointsOption = makeSipDialOptions.options.find((option) => option.name === "extensionOnlyFreeEndpoints");
     assert.strictEqual(freeEndpointsOption, undefined, "Only Free Endpoints must not exist for trunk/direct dial");
     assert.ok(!makeSipDialOptions.options.some((option) => option.name === "dialId"));
     assert.ok(breakDialOptions.options.some((option) => option.name === "dialId"));
@@ -662,18 +686,20 @@ async function testActionOperationContract() {
     assert.strictEqual(propertyByName.get("dtmfMethod"), undefined);
     assert.strictEqual(propertyByName.get("dtmfDurationMs"), undefined);
     assert.strictEqual(propertyByName.get("dtmfGapMs"), undefined);
-    const bridgeCallOptions = properties.find((property) => property.name === "callOptions" && property.displayOptions?.show?.operation?.includes("call.bridge"));
-    const waitCallOptions = properties.find((property) => property.name === "callOptions" && property.displayOptions?.show?.operation?.includes("call.wait"));
+    const bridgeCallOptions = properties.find((property) => property.name === "options" && property.displayOptions?.show?.operation?.includes("call.bridge"));
+    const waitCallOptions = properties.find((property) => property.name === "options" && property.displayOptions?.show?.operation?.includes("call.wait"));
     const waitCallTimeoutProperty = properties.find((property) => property.name === "timeoutSeconds" && property.displayOptions?.show?.operation?.includes("call.wait"));
-    assert.ok(bridgeCallOptions, "missing call.bridge callOptions");
-    assert.ok(waitCallOptions, "missing call.wait callOptions");
+    assert.ok(bridgeCallOptions, "missing call.bridge options");
+    assert.ok(waitCallOptions, "missing call.wait options");
     assert.ok(waitCallTimeoutProperty, "missing call.wait timeoutSeconds");
     assert.doesNotMatch(waitCallTimeoutProperty.description || "", /wait indefinitely/i);
     assert.ok(bridgeCallOptions.options.some((option) => option.name === "emitDtmfEvents"));
     assert.ok(bridgeCallOptions.options.some((option) => option.name === "relayDtmf"));
     assert.ok(!bridgeCallOptions.options.some((option) => option.name === "relaySignaling"));
+    assert.ok(waitCallOptions.options.some((option) => option.name === "interruptReasons"));
+    assert.ok(waitCallOptions.options.some((option) => option.name === "clearDtmfBuffer"));
     assert.ok(waitCallOptions.options.some((option) => option.name === "interdigitTimeoutSeconds"));
-    const mediaOptionCollections = properties.filter((property) => property.name === "mediaOptions");
+    const mediaOptionCollections = properties.filter((property) => property.name === "options");
     const directRecordingActiveProperty = properties.find((property) =>
       property.name === "active"
       && property.displayOptions?.show?.resource?.includes("recording")
@@ -684,22 +710,32 @@ async function testActionOperationContract() {
       && property.displayOptions?.show?.operation?.includes("respond.toRecord"));
     assert.strictEqual(directRecordingActiveProperty, undefined);
     assert.ok(respondRecordingActiveProperty, "respond recording should still expose active");
-    const stopMediaIdOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.stopMedia") && property.displayOptions?.show?.stopMediaTarget?.includes("mediaId"));
+    const stopMediaByMediaIdOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.stopMedia") && property.displayOptions?.show?.stopMediaTarget?.includes("mediaId"));
     const stopMediaLegOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.stopMedia") && property.displayOptions?.show?.stopMediaTarget?.includes("legId"));
     const playAudioLegOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.playAudio"));
     const playAudioHttpOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.playAudio") && property.displayOptions?.show?.sourceType?.includes("http"));
-    const playAudioVoiceOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.playAudio") && property.displayOptions?.show?.interruptOnVoice?.includes(true));
-    const recordSilenceOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.recordAudio") && property.displayOptions?.show?.interruptOnSilence?.includes(true));
+    const interruptOnMediaProperty = properties.find((property) =>
+      property.name === "interruptOn"
+      && property.displayOptions?.show?.operation?.includes("media.playAudio"));
+    const interruptOnDialWaitProperty = properties.find((property) =>
+      property.name === "interruptOn"
+      && property.displayOptions?.show?.operation?.includes("dial.wait"));
+    const playAudioVoiceOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.playAudio") && property.displayOptions?.show?.interruptOn?.includes("voice"));
+    const recordSilenceOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.recordAudio") && property.displayOptions?.show?.interruptOn?.includes("silence"));
     const recordHttpOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.recordAudio") && property.displayOptions?.show?.recordOutputType?.includes("http"));
     const sendDtmfOptions = mediaOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("media.sendDtmf"));
+    const directDialOptions = dialOptionCollections.find((property) => property.displayOptions?.show?.operation?.includes("dial.make") && property.displayOptions?.show?.callMode?.includes("direct"));
     const overlappingPlayAudioOptions = mediaOptionCollections.filter((property) => property.displayOptions?.show?.operation?.includes("media.playAudio") && !property.displayOptions?.show?.sourceType);
     const overlappingRecordAudioOptions = mediaOptionCollections.filter((property) => property.displayOptions?.show?.operation?.includes("media.recordAudio") && !property.displayOptions?.show?.recordOutputType);
-    assert.ok(stopMediaIdOptions?.options.some((option) => option.name === "mediaId"));
+    assert.ok(stopMediaByMediaIdOptions?.options.some((option) => option.name === "mediaId"));
     assert.ok(!playAudioLegOptions?.options.some((option) => option.name === "mediaId"));
     assert.deepStrictEqual(overlappingPlayAudioOptions, []);
     assert.deepStrictEqual(overlappingRecordAudioOptions, []);
     assert.ok(stopMediaLegOptions?.options.some((option) => option.name === "legId"));
     assert.ok(playAudioLegOptions?.options.some((option) => option.name === "duckingFactor"));
+    assert.deepStrictEqual(interruptOnMediaProperty?.options?.map((option) => option.value), ["dtmf", "voice"]);
+    assert.deepStrictEqual(interruptOnDialWaitProperty?.options?.map((option) => option.value), ["dtmf"]);
+    assert.match(interruptOnDialWaitProperty?.description || "", /interrupts the wait/i);
     assert.ok(playAudioLegOptions?.options.some((option) => option.name === "stopOtherMedia"));
     assert.ok(playAudioLegOptions?.options.some((option) => option.name === "mediaExecutionMode"));
     assert.ok(playAudioHttpOptions?.options.some((option) => option.name === "playbackHttpMethod"));
@@ -763,6 +799,10 @@ async function testActionOperationContract() {
     assert.ok(sendDtmfOptions?.options.some((option) => option.name === "dtmfMethod"));
     assert.ok(sendDtmfOptions?.options.some((option) => option.name === "dtmfDurationMs"));
     assert.ok(sendDtmfOptions?.options.some((option) => option.name === "dtmfGapMs"));
+    assert.ok(!properties.some((property) => property.name === "codecs"));
+    assert.ok(!properties.some((property) => property.name === "dtmfMethods"));
+    assert.ok(directDialOptions?.options.some((option) => option.name === "codecs"));
+    assert.ok(directDialOptions?.options.some((option) => option.name === "dtmfMethods"));
     const customSipHeadersOption = makeSipDialOptions.options.find((option) => option.name === "customSipHeaders");
     assert.strictEqual(customSipHeadersOption.options[0].values[0].required, true);
   });
@@ -775,7 +815,7 @@ async function testMissingOperationRejected() {
     const node = new SipPbx();
     Object.assign(node, createExecuteContext({
       resource: "media",
-      mediaOptions: { legId: "leg-audio" },
+      options: { legId: "leg-audio" },
     }, [{ json: {} }]));
     await assert.rejects(
       async () => await node.execute(),
@@ -786,9 +826,35 @@ async function testMissingOperationRejected() {
   return { ok: true };
 }
 
+async function testActionPropertyDependencies() {
+  await withPatchedRuntime({}, sipPbxNodeModulePath, async ({ SipPbx }) => {
+    const node = new SipPbx();
+    const properties = node.description.properties;
+    const topLevelNames = new Set(properties.map((property) => property.name));
+
+    for (const property of properties) {
+      const displayOptions = property.displayOptions || {};
+      for (const dependencySet of [displayOptions.show, displayOptions.hide]) {
+        if (!dependencySet) {
+          continue;
+        }
+        for (const dependencyName of Object.keys(dependencySet)) {
+          assert.ok(
+            topLevelNames.has(dependencyName),
+            `top-level property ${property.name} must not depend on missing parameter ${dependencyName}`,
+          );
+        }
+      }
+    }
+  });
+
+  return { ok: true };
+}
+
 async function runActionControlNodeSmokeCases() {
   return {
     actionOperationContract: await testActionOperationContract(),
+    actionPropertyDependencies: await testActionPropertyDependencies(),
     missingOperationRejected: await testMissingOperationRejected(),
     callWaitForEvent: await testCallWaitForEventRouting(),
     callWaitForEventMultipleLegs: await testCallWaitForEventRoutingMultipleLegs(),

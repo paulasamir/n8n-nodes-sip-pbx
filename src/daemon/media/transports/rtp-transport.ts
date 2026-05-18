@@ -1,6 +1,19 @@
 import dgram from "dgram";
 import type { AddressInfo } from "net";
 import { OPTION_DEFAULTS } from "../../../shared/option-defaults";
+import {
+  allowsSipDtmfMethod,
+  SIP_AUDIO_CODEC_ALAW,
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_G729,
+  SIP_AUDIO_CODEC_MULAW,
+  SIP_AUDIO_CODEC_OPUS,
+  normalizeSipAudioCodecFilters,
+  normalizeSipDtmfMethodFilters,
+  type SipDtmfMethodFilter,
+  SIP_DTMF_METHOD_INBAND,
+  SIP_DTMF_METHOD_RFC2833,
+} from "../../../shared/sip-media-filters";
 import type { WorkerTransportOutputMessage } from "../worker/media-worker";
 import { findPlayTonePreset, parseCanonicalToneSegments } from "../operations/play-tones-operation";
 import { TransportAttachment, type MediaTransport, type MediaTransportDetails, type MediaTransportInputEvent } from "./media-transport";
@@ -24,8 +37,10 @@ import {
   createCodec,
   getImplementedCodecDescriptors,
   pickNegotiatedDtmfPayloadType,
+  resolveCodecForPayloadType,
   resolveAudioCodecForPayloadType,
 } from "../codecs/audio-codec";
+import { InbandDtmfDetector } from "../dtmf/inband-dtmf-detector";
 
 const WORKER_MESSAGE_KIND_TRANSPORT_INPUT = 4;
 const WORKER_TRANSPORT_INPUT_OPCODE_RTP_PACKET = 1;
@@ -50,6 +65,8 @@ export type RtpTransportConfig = {
   dtmfPayloadType?: number | null;
   payloadTypes?: number[] | null;
   payloadCodecs?: Record<number, NegotiatedPayloadCodec> | null;
+  allowedAudioCodecs?: string[] | null;
+  allowedDtmfMethods?: string[] | null;
   currentSequenceNumber?: number | null;
   currentTimestamp?: number | null;
   currentSsrc?: number | null;
@@ -616,6 +633,7 @@ export class RtpTransport implements MediaTransport {
   private dtmfPayloadType: number | null;
   private payloadTypes: number[];
   private payloadCodecs: Record<number, NegotiatedPayloadCodec>;
+  private allowedDtmfMethods: SipDtmfMethodFilter[];
   private sequenceNumber: number;
   private timestamp: number;
   private ssrc: number;
@@ -635,6 +653,7 @@ export class RtpTransport implements MediaTransport {
   private firstInboundAudioDecodeFailedLogged = false;
   private sendErrorLogged = false;
   private lastInboundDtmfKey = "";
+  private readonly inbandDtmfDetector = new InbandDtmfDetector();
 
   private decodeBufferPool: RtpDecodeBufferPool | null = null;
 
@@ -666,6 +685,7 @@ export class RtpTransport implements MediaTransport {
     this.dtmfPayloadType = 101;
     this.payloadTypes = [defaultAudioCodec.payloadType, 101];
     this.payloadCodecs = {};
+    this.allowedDtmfMethods = [SIP_DTMF_METHOD_RFC2833];
     this.sequenceNumber = Math.floor(Math.random() * 0x10000);
     this.timestamp = Math.floor(Math.random() * 0xffffffff) >>> 0;
     this.ssrc = Math.floor(Math.random() * 0xffffffff) >>> 0;
@@ -705,10 +725,34 @@ export class RtpTransport implements MediaTransport {
     const requestedTimestamp = readOptionalInteger(config.currentTimestamp);
     const requestedSsrc = readOptionalInteger(config.currentSsrc);
     const normalizedPayloadCodecs = { ...(config.payloadCodecs || {}) };
+    const allowedAudioCodecs = normalizeSipAudioCodecFilters(config.allowedAudioCodecs);
+    const allowedDtmfMethods = normalizeSipDtmfMethodFilters(config.allowedDtmfMethods);
+    this.allowedDtmfMethods = allowedDtmfMethods;
+    this.inbandDtmfDetector.reset();
     const normalizedPayloadTypes = Array.isArray(config.payloadTypes)
       ? config.payloadTypes
         .map((value) => Number(value))
         .filter((value) => Number.isInteger(value) && value >= 0)
+        .filter((value) => {
+          const descriptor = resolveCodecForPayloadType(value, normalizedPayloadCodecs);
+          if (!descriptor || !descriptor.implemented) {
+            return false;
+          }
+          if (descriptor.kind === "dtmf") {
+            return allowsSipDtmfMethod(allowedDtmfMethods, SIP_DTMF_METHOD_RFC2833);
+          }
+          if (!allowedAudioCodecs.length) {
+            return true;
+          }
+          const codecName = String(descriptor.name || "").trim().toLowerCase();
+          return (
+            (codecName === "pcma" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_ALAW))
+            || (codecName === "pcmu" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_MULAW))
+            || (codecName === "g722" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_G722))
+            || (codecName === "g729" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_G729))
+            || (codecName === "opus" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_OPUS))
+          );
+        })
       : [];
     const requestedAudioPayloadType = readOptionalInteger(config.audioPayloadType);
     const requestedDtmfPayloadType = readOptionalInteger(config.dtmfPayloadType);
@@ -730,7 +774,9 @@ export class RtpTransport implements MediaTransport {
     this.audioPayloadType = requestedDescriptor
       ? requestedAudioPayloadType
       : nextDescriptor.payloadType;
-    this.dtmfPayloadType = requestedDtmfPayloadType != null
+    this.dtmfPayloadType = !allowsSipDtmfMethod(allowedDtmfMethods, SIP_DTMF_METHOD_RFC2833)
+      ? null
+      : requestedDtmfPayloadType != null
       && (
         !normalizedPayloadTypes.length
         || normalizedPayloadTypes.includes(requestedDtmfPayloadType)
@@ -741,6 +787,7 @@ export class RtpTransport implements MediaTransport {
         normalizedPayloadTypes,
         normalizedPayloadCodecs,
         nextDescriptor.clockRate,
+        allowedDtmfMethods,
       )
         ?? (normalizedPayloadTypes.length ? null : 101);
     this.payloadTypes = this.dtmfPayloadType != null
@@ -766,6 +813,7 @@ export class RtpTransport implements MediaTransport {
       this.audioPayloadType,
       this.dtmfPayloadType,
       this.payloadCodecs,
+      this.allowedDtmfMethods,
     );
     return {
       localRtpHost: this.advertisedHost,
@@ -812,6 +860,7 @@ export class RtpTransport implements MediaTransport {
         return;
       }
       this.lastInboundDtmfKey = dtmfKey;
+      this.inbandDtmfDetector.notifyExternalDtmf();
       this.dispatch({
         type: "dtmf",
         digits: dtmf.digits,
@@ -879,6 +928,24 @@ export class RtpTransport implements MediaTransport {
         (pcmLength / (2 * pcmChannels) / pcmSampleRate) * 1000,
       ),
     );
+    if (allowsSipDtmfMethod(this.allowedDtmfMethods, SIP_DTMF_METHOD_INBAND)) {
+      const createdAt = Date.now();
+      for (const digits of this.inbandDtmfDetector.feed({
+        pcm: decodeTarget,
+        bytes: pcmLength,
+        sampleRate: pcmSampleRate,
+        channels: pcmChannels,
+        durationMs,
+        nowMs: createdAt,
+      })) {
+        this.dispatch({
+          type: "dtmf",
+          digits,
+          createdAt,
+          payloadType: parsed.payloadType,
+        });
+      }
+    }
     this.dispatch({
       type: "audio",
       pcm: decodeTarget,

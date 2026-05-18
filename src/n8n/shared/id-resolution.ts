@@ -1,5 +1,5 @@
 import type { NodeParameterReader } from "./input-normalization";
-import { readOptionalScalarCollectionParameter } from "./input-normalization";
+import { readOptionalOptionsParameter } from "./input-normalization";
 import { readResponseHandle } from "./pbx-payload-context";
 
 function getJson(item: any): Record<string, unknown> {
@@ -13,8 +13,8 @@ function getSipPbxMetadata(item: any): Record<string, unknown> {
   return json && typeof json.sipPbx === "object" ? (json.sipPbx as Record<string, unknown>) : {};
 }
 
-function readRequestIdParameter(node: NodeParameterReader, index: number, collectionName = "respondOptions"): string {
-  return readOptionalScalarCollectionParameter(node, collectionName, "requestId", index);
+function readRequestIdParameter(node: NodeParameterReader, index: number): string {
+  return readOptionalOptionsParameter(node, "requestId", index);
 }
 
 export function resolveLegId(
@@ -22,9 +22,8 @@ export function resolveLegId(
   item: any,
   index: number,
   fieldName = "legId",
-  collectionName = "callOptions",
 ): string {
-  const explicit = readOptionalScalarCollectionParameter(node, collectionName, fieldName, index);
+  const explicit = readOptionalOptionsParameter(node, fieldName, index);
   if (explicit) {
     return explicit;
   }
@@ -38,9 +37,8 @@ export function resolveAiLegId(
   item: any,
   index: number,
   fieldName = "legId",
-  collectionName = "aiOptions",
 ): string {
-  const explicit = readOptionalScalarCollectionParameter(node, collectionName, fieldName, index);
+  const explicit = readOptionalOptionsParameter(node, fieldName, index);
   if (explicit) {
     return explicit;
   }
@@ -54,9 +52,8 @@ export function resolveDialId(
   item: any,
   index: number,
   fieldName = "dialId",
-  collectionName = "dialOptions",
 ): string {
-  const explicit = readOptionalScalarCollectionParameter(node, collectionName, fieldName, index);
+  const explicit = readOptionalOptionsParameter(node, fieldName, index);
   if (explicit) {
     return explicit;
   }
@@ -66,15 +63,15 @@ export function resolveDialId(
 }
 
 export function resolveMediaLegId(node: NodeParameterReader, item: any, index: number): string {
-  return resolveLegId(node, item, index, "legId", "mediaOptions");
+  return resolveLegId(node, item, index, "legId");
 }
 
 export function resolveStopMediaLegId(node: NodeParameterReader, item: any, index: number): string {
-  return resolveLegId(node, item, index, "legId", "mediaOptions");
+  return resolveLegId(node, item, index, "legId");
 }
 
 export function resolveStopMediaId(node: NodeParameterReader, item: any, index: number): string {
-  const explicit = readOptionalScalarCollectionParameter(node, "mediaOptions", "mediaId", index);
+  const explicit = readOptionalOptionsParameter(node, "mediaId", index);
   if (explicit) {
     return explicit;
   }

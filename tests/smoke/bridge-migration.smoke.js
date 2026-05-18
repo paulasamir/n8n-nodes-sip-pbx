@@ -72,6 +72,9 @@ async function main() {
   const { ControllerClient } = require("../../dist/control/controller-client.js");
   const { PbxRuntime } = require("../../dist/runtime/pbx-runtime.js");
   const { SipPbxDaemon } = require("../../dist/daemon/sip-pbx-daemon.js");
+  const {
+    INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED,
+  } = require("../../dist/shared/interrupt-reasons.js");
 
   const socketPath = createSocketPath();
   const daemon = new SipPbxDaemon(socketPath);
@@ -112,18 +115,19 @@ async function main() {
     await Promise.all([
       runtime.stopMedia({
         stopMediaTarget: "mediaId",
-        stopMediaId: legs[0].tone.mediaId,
-        stopMediaReason: "bridge_migration_prepare",
+        mediaId: legs[0].tone.mediaId,
       }),
       runtime.stopMedia({
         stopMediaTarget: "mediaId",
-        stopMediaId: bridgeTone.mediaId,
-        stopMediaReason: "bridge_migration_prepare",
+        mediaId: bridgeTone.mediaId,
       }),
     ]);
 
     step("bridge first and seventeenth");
-    const bridgeInterruptPromise = runtime.waitForLegEvent(bridgeLeg.legId, { timeoutSeconds: 2 });
+    const bridgeInterruptPromise = runtime.waitForLegEvent(bridgeLeg.legId, {
+      timeoutSeconds: 2,
+      interruptReasons: [INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED],
+    });
     const bridgeResult = await runtime.bridge(legs[0].leg.legId, bridgeLeg.legId, {
       emitDtmfEvents: true,
       relayDtmf: "auto",
@@ -135,7 +139,7 @@ async function main() {
     await runtime.hangup(legs[0].leg.legId);
     const bridgeInterruptEvent = await bridgeInterruptPromise;
     assert.strictEqual(bridgeInterruptEvent.output, "interrupt");
-    assert.strictEqual(bridgeInterruptEvent.reason, "bridge");
+    assert.strictEqual(bridgeInterruptEvent.reason, INTERRUPT_REASON_CALL_BRIDGE_REMOVED_PEER_ENDED);
 
     const survivingLeg = daemon.legService.getLeg(bridgeLeg.legId);
     assert.ok(survivingLeg);

@@ -26,6 +26,7 @@ export type MediaEventType = (typeof MEDIA_EVENTS)[number];
 export const DIAL_EVENT_RINGING = "ringing" as const;
 export const DIAL_EVENT_PROGRESS = "progress" as const;
 export const DIAL_EVENT_ANSWERED = "answered" as const;
+export const DIAL_EVENT_INTERRUPTED = "interrupted" as const;
 export const DIAL_EVENT_REJECTED = "rejected" as const;
 export const DIAL_EVENT_TIMEOUT = "timeout" as const;
 export const DIAL_EVENT_FAILED = "failed" as const;
@@ -33,6 +34,7 @@ export const DIAL_EVENTS = [
   DIAL_EVENT_RINGING,
   DIAL_EVENT_PROGRESS,
   DIAL_EVENT_ANSWERED,
+  DIAL_EVENT_INTERRUPTED,
   DIAL_EVENT_REJECTED,
   DIAL_EVENT_TIMEOUT,
   DIAL_EVENT_FAILED,

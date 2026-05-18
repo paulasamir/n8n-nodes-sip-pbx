@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.1.2 - 2026-05-18
+
+### Wait, interrupt, and queue lifecycle semantics
+
+- Reworked `call.wait`, `dial.wait`, and `media.wait` around a shared built-in `interruptReason` catalog with source-prefixed values such as:
+  - `call_dtmf`
+  - `call_ended`
+  - `call_bridge_joined`
+  - `call_queue_removed`
+  - `media_voice`
+  - `media_silence`
+  - `media_stopped`
+- `call.wait` now exposes `Interrupt On` as an explicit multi-select option. When it is empty, interrupt events are consumed and ignored instead of taking the `Interrupted` branch.
+- Added `Clear Queued DTMF` to `call.wait` so stale queued digits can be dropped before starting a new leg wait.
+- `call.wait` branch naming is now consistent with the rest of the node set and uses `Interrupted`.
+- `call.bridge` now emits immediate bridge lifecycle interrupts to active `call.wait` operations, and bridge/queue interrupts were normalized into a consistent reason vocabulary.
+- Queue lifecycle events are now surfaced on legs through `call_queue_placed` and `call_queue_removed` where applicable, while caller hangup still resolves as normal `Ended`.
+- `dial.wait` master-leg interruption was rewritten to match the same cancellation model used by other waits:
+  - master-leg `ended` always interrupts the wait
+  - master-leg DTMF interrupts only when enabled
+  - queued master-leg DTMF/ended no longer get consumed by the interrupt check before a later `call.wait`
+- Fixed the race where `dial.wait` could surface a runtime `wait_timeout` exception instead of taking the `Timeout` branch.
+
+### DTMF buffering and media behavior
+
+- Blocking media, `media.wait`, and `dial.wait` now consume queued/live DTMF when DTMF interruption is disabled, so stale digits do not leak into later `call.wait` steps.
+- `media.wait` now mirrors blocking-media DTMF behavior on watched non-interrupting media.
+- Fixed and expanded transport/media DTMF handling around queue loops, bridge flows, and non-interrupting waits.
+
+### Action contract cleanup
+
+- Renamed public action fields for consistency:
+  - `mediaLegId` / `stopMediaLegId` -> `legId`
+  - `stopMediaId` -> `mediaId`
+  - `waitMediaIds` -> `mediaIds`
+- Simplified wait inputs:
+  - `call.wait` now uses only `legIds`
+  - `dial.wait` now uses only `dialIds`
+- Renamed `extensionListOnlyFreeEndpoints` to `extensionOnlyFreeEndpoints`.
+- Removed the public `Reason` selector from `media.stopMedia`; explicit stop now always finalizes media with `interruptReason = "media_stopped"`.
+
+### Defaults and normalization
+
+- Centralized node option defaults into shared semantic defaults so UI, input normalization, and daemon/runtime fallback no longer drift independently.
+- Reduced generic fallback usage in favor of domain-specific defaults, especially for boolean and numeric settings.
+- Removed remaining runtime-side business defaults so the runtime layer acts as a thinner transport/translation layer.
+
+### Demo and documentation
+
+- Rebuilt the demo walkthrough around a part-based structure with a canonical full demo and a reduced set of importable examples.
+- Updated demo JSON and wiki pages to reflect:
+  - queue-owned caller lifecycle
+  - AI offline flow layering
+  - recording layering
+  - current interrupt reason names and wait semantics
+- Added and expanded `Why This Works` sections in the example documentation.
+
 ## 0.1.1 - 2026-05-16
 
 ### Trunk trigger and SIP routing

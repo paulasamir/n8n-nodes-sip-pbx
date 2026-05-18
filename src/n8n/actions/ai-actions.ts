@@ -4,6 +4,7 @@ import type { SupplyData } from "n8n-workflow";
 import { z } from "zod";
 import type { PbxRuntime } from "../../runtime/pbx-runtime";
 import { VoiceAgentStreamBranchMemoryTurn, VoiceAgentStreamBranchToolCall } from "../../shared/branches";
+import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import {
   readAiInputConnections,
   readFixedCollectionItems,
@@ -434,18 +435,6 @@ function normalizeVoiceAgentRole(value: unknown): string {
   const normalized = String(value || "").trim().toLowerCase();
   if (!normalized) {
     return "";
-  }
-  if (normalized === "human" || normalized === "user") {
-    return "User";
-  }
-  if (normalized === "ai" || normalized === "assistant") {
-    return "Assistant";
-  }
-  if (normalized === "system") {
-    return "System";
-  }
-  if (normalized === "tool") {
-    return "Tool";
   }
   return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
@@ -1059,8 +1048,8 @@ export async function executeAttachVoiceAgent(node: any, runtime: PbxRuntime, it
 }
 
 export async function supplyAiTool(node: any, runtime: PbxRuntime, itemIndex: number): Promise<SupplyData> {
-  const ref = requireActionValue("ref", readStringParameter(node, "ref", itemIndex, ""));
-  const description = requireActionValue("aiToolDescription", readStringParameter(node, "aiToolDescription", itemIndex, ""));
+  const ref = requireActionValue("ref", readStringParameter(node, "ref", itemIndex, OPTION_DEFAULTS.common.string));
+  const description = requireActionValue("aiToolDescription", readStringParameter(node, "aiToolDescription", itemIndex, OPTION_DEFAULTS.common.string));
   const flowParams = readAiFlowParams(node, itemIndex);
   const schema = buildAiToolSchema(node, itemIndex);
   const DynamicStructuredTool = loadDynamicStructuredToolConstructor();

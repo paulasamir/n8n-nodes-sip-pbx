@@ -5,6 +5,7 @@ import {
   DialMakeBranchUnavailable,
   DialMakeBranchResult,
   DialWaitBranchAnswered,
+  DialWaitBranchInterrupted,
   DialWaitBranchFailed,
   DialWaitBranchProgress,
   DialWaitBranchRejected,
@@ -46,15 +47,16 @@ function actionOutputsExpression(): string {
   const bridge = JSON.stringify(BridgeBranch);
   const unbridge = listToOutputs(UnbridgeBranches);
   const waitMedia = listToOutputs(WaitMediaBranches);
-  const callWaitTailNoFallback = buildCallWaitStaticTail(false);
-  const callWaitTailWithFallback = buildCallWaitStaticTail(true);
-  const callTailNoFallbackJs = JSON.stringify(callWaitTailNoFallback);
-  const callTailWithFallbackJs = JSON.stringify(callWaitTailWithFallback);
+  const callTailNoFallbackNoInterruptJs = JSON.stringify(buildCallWaitStaticTail(false, false));
+  const callTailNoFallbackWithInterruptJs = JSON.stringify(buildCallWaitStaticTail(false, true));
+  const callTailWithFallbackNoInterruptJs = JSON.stringify(buildCallWaitStaticTail(true, false));
+  const callTailWithFallbackWithInterruptJs = JSON.stringify(buildCallWaitStaticTail(true, true));
   const dialMakeResult = JSON.stringify(DialMakeBranchResult);
   const dialMakeUnavailable = JSON.stringify(DialMakeBranchUnavailable);
   const dialRinging = JSON.stringify(DialWaitBranchRinging);
   const dialProgress = JSON.stringify(DialWaitBranchProgress);
   const dialAnswered = JSON.stringify(DialWaitBranchAnswered);
+  const dialInterrupted = JSON.stringify(DialWaitBranchInterrupted);
   const dialRejected = JSON.stringify(DialWaitBranchRejected);
   const dialFailed = JSON.stringify(DialWaitBranchFailed);
   const dialTimeout = JSON.stringify(DialWaitBranchTimeout);
@@ -64,8 +66,8 @@ function actionOutputsExpression(): string {
   const mediaInfiniteTone = JSON.stringify(MediaInfiniteToneBranchInterrupted);
   return `={{(() => {
     const operation = $parameter["operation"];
-    const mediaOptions = $parameter["mediaOptions"] || {};
-    const mediaExecutionMode = mediaOptions.mediaExecutionMode || $parameter["mediaExecutionMode"];
+    const options = $parameter["options"] || {};
+    const mediaExecutionMode = options.mediaExecutionMode || $parameter["mediaExecutionMode"];
     if (operation === "ai.invokeAiTool") return [{ type: "ai_tool", displayName: "Tool" }];
     if (operation === "call.bridge") return [{ type: "main", displayName: ${bridge} }];
     if (operation === "ai.attachVoiceAgent") return [{ type: "main", displayName: ${result} }];
@@ -81,11 +83,16 @@ function actionOutputsExpression(): string {
     }
     if (operation === "call.wait") {
       const rulesRoot = $parameter["rules"] || {};
+      const optionsRoot = $parameter["options"] || {};
       const rules = Array.isArray(rulesRoot.item) ? rulesRoot.item : [];
       const outputs = rules
         .filter((rule) => rule && rule.pattern && rule.label)
         .map((rule, index) => ({ type: "main", displayName: String(rule.label || rule.pattern || ("DTMF " + (index + 1))) }));
-      const tail = $parameter["waitDtmfFallbackEnabled"] ? ${callTailWithFallbackJs} : ${callTailNoFallbackJs};
+      const interruptReasons = Array.isArray(optionsRoot["interruptReasons"]) ? optionsRoot["interruptReasons"] : [];
+      const includeInterrupt = interruptReasons.length > 0;
+      const tail = $parameter["waitDtmfFallbackEnabled"]
+        ? (includeInterrupt ? ${callTailWithFallbackWithInterruptJs} : ${callTailWithFallbackNoInterruptJs})
+        : (includeInterrupt ? ${callTailNoFallbackWithInterruptJs} : ${callTailNoFallbackNoInterruptJs});
       for (const name of tail) outputs.push({ type: "main", displayName: name });
       return outputs;
     }
@@ -96,6 +103,7 @@ function actionOutputsExpression(): string {
       if (selected.includes("progress")) outputs.push({ type: "main", displayName: ${dialProgress} });
       if (selected.includes("rejected")) outputs.push({ type: "main", displayName: ${dialRejected} });
       outputs.push({ type: "main", displayName: ${dialAnswered} });
+      outputs.push({ type: "main", displayName: ${dialInterrupted} });
       outputs.push({ type: "main", displayName: ${dialTimeout} });
       outputs.push({ type: "main", displayName: ${dialFailed} });
       return outputs;

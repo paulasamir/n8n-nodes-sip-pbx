@@ -26,6 +26,14 @@ export abstract class EventfulDestroyable<TEvent> {
     return this.events.shiftMatching(predicate);
   }
 
+  peekQueuedEventMatching(predicate: (event: TEvent) => boolean): TEvent | null {
+    return this.events.peekMatching(predicate);
+  }
+
+  consumeQueuedEventsMatching(predicate: (event: TEvent) => boolean): number {
+    return this.events.consumeMatching(predicate);
+  }
+
   waitForEvent(predicate: (event: TEvent) => boolean, timeoutMs: number): Promise<TEvent> {
     return this.waiters.waitFor(predicate, timeoutMs);
   }

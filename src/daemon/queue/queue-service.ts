@@ -1,3 +1,8 @@
+import {
+  INTERRUPT_REASON_CALL_QUEUE_PLACED,
+  INTERRUPT_REASON_CALL_QUEUE_REMOVED,
+  type CallInterruptReason,
+} from "../../shared/interrupt-reasons";
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { DIAL_STATUS_ANSWERED, LEG_STATUS_CALLBACK, LEG_STATUS_ENDED } from "../../shared/result-events";
 import { normalizeStringList } from "../../shared/string-utils";
@@ -85,6 +90,7 @@ export class QueueService {
         rejoinCandidate.retryPauseMs = retryPauseMs;
         this.entries.replaceLegBinding(rejoinCandidate, legId);
         this.legService.updateStatus(legId, "queued");
+        this.publishQueueLegInterrupt(legId, INTERRUPT_REASON_CALL_QUEUE_PLACED);
         this.scheduleEntryBranch(rejoinCandidate, 0);
         return { legId };
       }
@@ -111,7 +117,7 @@ export class QueueService {
             }))
             .filter((value) => value.name)
           : [],
-        extensionListOnlyFreeEndpoints: queueDialConfig?.extensionListOnlyFreeEndpoints !== false,
+        extensionOnlyFreeEndpoints: queueDialConfig?.extensionOnlyFreeEndpoints !== false,
         sequentialAttemptTimeoutSeconds: Math.max(0, Number(queueDialConfig?.sequentialAttemptTimeoutSeconds || OPTION_DEFAULTS.dial.sequentialAttemptTimeoutSeconds)),
         sequentialGapSeconds: Math.max(0, Number(queueDialConfig?.sequentialGapSeconds || OPTION_DEFAULTS.dial.sequentialGapSeconds)),
       },
@@ -119,11 +125,15 @@ export class QueueService {
     });
     this.entries.create(entry, placement);
     this.legService.updateStatus(legId, "queued");
+    this.publishQueueLegInterrupt(legId, INTERRUPT_REASON_CALL_QUEUE_PLACED);
     this.scheduleEntryBranch(entry, 0);
     return { legId };
   }
 
-  removeEntryForLeg(legId: string): { legId: string; removed: boolean } {
+  removeEntryForLeg(
+    legId: string,
+    options?: { suppressLegInterrupt?: boolean },
+  ): { legId: string; removed: boolean } {
     const entry = this.entries.getByLegId(legId);
     if (!entry) {
       return { legId, removed: false };
@@ -134,7 +144,7 @@ export class QueueService {
       this.retryEntry(entry, entry.retryPauseMs);
       return { legId, removed: false };
     }
-    this.endEntry(entry, "queue_entry_removed");
+    this.endEntry(entry, "queue_entry_removed", { suppressLegInterrupt: options?.suppressLegInterrupt === true });
     return { legId, removed: true };
   }
 
@@ -252,14 +262,28 @@ export class QueueService {
     }
   }
 
-  private endEntry(entry: QueueEntry, reason: string): void {
+  private endEntry(
+    entry: QueueEntry,
+    reason: string,
+    options?: { suppressLegInterrupt?: boolean },
+  ): void {
     if (entry.isEnded()) {
       return;
     }
     this.abortActiveDial(entry, reason);
     this.clearBranchTimer(entry.queueEntryId);
     this.entries.removeEntry(entry.queueEntryId);
+    if (entry.mode === "live" && options?.suppressLegInterrupt !== true) {
+      this.publishQueueLegInterrupt(entry.legId, INTERRUPT_REASON_CALL_QUEUE_REMOVED);
+    }
     entry.toEnded();
+  }
+
+  private publishQueueLegInterrupt(legId: string, reason: CallInterruptReason): void {
+    if (!this.legService.getLeg(legId)) {
+      return;
+    }
+    this.legService.publishInterrupt(legId, reason);
   }
 
   private scheduleEntryBranch(entry: QueueEntry, delayMs: number): void {
@@ -312,7 +336,7 @@ export class QueueService {
       callerNumber: entry.queueDialConfig.callerNumber,
       callerName: entry.queueDialConfig.callerName,
       customSipHeaders: entry.queueDialConfig.customSipHeaders,
-      extensionListOnlyFreeEndpoints: entry.queueDialConfig.extensionListOnlyFreeEndpoints,
+      extensionOnlyFreeEndpoints: entry.queueDialConfig.extensionOnlyFreeEndpoints,
       sequentialAttemptTimeoutSeconds: entry.queueDialConfig.sequentialAttemptTimeoutSeconds,
       sequentialGapSeconds: entry.queueDialConfig.sequentialGapSeconds,
     });

@@ -116,17 +116,16 @@ async function main() {
 
     const stoppedRecording = await runtime.stopMedia({
       stopMediaTarget: "mediaId",
-      stopMediaId: backgroundRecording.mediaId,
-      stopMediaReason: "record_stop",
+      mediaId: backgroundRecording.mediaId,
     });
     assert.strictEqual(stoppedRecording.mediaId, backgroundRecording.mediaId);
 
     const waitedRecording = await runtime.waitMedia({
-      waitMediaIds: [backgroundRecording.mediaId],
+      mediaIds: [backgroundRecording.mediaId],
       waitMediaTimeoutSeconds: 0.1,
     });
     assert.strictEqual(waitedRecording.status, "interrupted");
-    assert.strictEqual(waitedRecording.interruptReason, "record_stop");
+    assert.strictEqual(waitedRecording.interruptReason, "media_stopped");
     assert.ok(waitedRecording.outputBinaryBase64);
 
     const filePath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "sip-pbx-record-")), "record.wav");

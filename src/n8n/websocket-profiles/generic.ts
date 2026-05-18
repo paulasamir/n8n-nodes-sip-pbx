@@ -1,11 +1,11 @@
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { normalizeStringList } from "../../shared/string-utils";
 import {
-  readCollectionOptions,
+  readOptions,
   readStringParameter,
 } from "../shared/input-normalization";
 import {
-  buildAddOptionsCollectionProperty,
+  buildOptionsCollectionProperty,
   type UiProperty,
   WEBSOCKET_HEADERS_JSON_HINT,
   WEBSOCKET_INITIAL_MESSAGES_JSON_HINT,
@@ -24,7 +24,7 @@ function buildGenericPrimaryProperties(show: Record<string, unknown>): UiPropert
       displayName: "WebSocket URL",
       name: "websocketUrl",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.dial.websocketUrl,
       required: true,
       description: WEBSOCKET_URL_HINT,
       displayOptions: { show: profileShow },
@@ -35,19 +35,19 @@ function buildGenericPrimaryProperties(show: Record<string, unknown>): UiPropert
 function buildGenericOptionCollections(show: Record<string, unknown>): UiProperty[] {
   const profileShow = extendShow(show);
   return [
-    buildAddOptionsCollectionProperty("dialOptions", profileShow, [
+    buildOptionsCollectionProperty({ show: profileShow }, [
       {
         displayName: "Generic WebSocket Headers JSON",
         name: "websocketHeadersJson",
         type: "json",
-        default: "{}",
+        default: OPTION_DEFAULTS.dial.websocketHeadersJson,
         description: WEBSOCKET_HEADERS_JSON_HINT,
       },
       {
         displayName: "Generic WebSocket Initial Messages JSON",
         name: "websocketInitialMessagesJson",
         type: "json",
-        default: "[]",
+        default: OPTION_DEFAULTS.dial.websocketInitialMessagesJson,
         description: WEBSOCKET_INITIAL_MESSAGES_JSON_HINT,
       },
       {
@@ -103,8 +103,8 @@ export const genericWebSocketDialProfile: WebSocketDialProfileDescriptor = {
     return [];
   },
   applyInput({ input, index, node }) {
-    input.websocketUrl = readStringParameter(node, "websocketUrl", index, "");
-    const options = readCollectionOptions(node, "dialOptions", index);
+    input.websocketUrl = readStringParameter(node, "websocketUrl", index, OPTION_DEFAULTS.dial.websocketUrl);
+    const options = readOptions(node, index);
     if (Object.prototype.hasOwnProperty.call(options, "websocketHeadersJson")) {
       input.websocketHeadersJson = options.websocketHeadersJson;
     }

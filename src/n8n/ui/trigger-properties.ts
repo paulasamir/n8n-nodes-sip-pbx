@@ -1,8 +1,10 @@
 import {
+  buildOptionsCollectionProperty,
   buildHeadersCollectionProperty,
   QUEUE_EXTENSIONS_HINT,
   REF_HINT,
-  buildAddOptionsCollectionProperty,
+  buildSipCodecFilterOption,
+  buildSipDtmfMethodsFilterOption,
   buildSipListenerOptionEntries,
   buildStaticCredentialsCollectionProperty,
   type UiProperty,
@@ -48,7 +50,7 @@ function buildUsernamePrefixOption(): UiProperty {
     displayName: "Username Prefix",
     name: "authorizationUsernamePrefix",
     type: "string",
-    default: "",
+    default: OPTION_DEFAULTS.common.string,
     description: EXTENSIONS_USERNAME_PREFIX_HINT,
   };
 }
@@ -84,7 +86,7 @@ function buildTrunkStaticCredentialProperties(show: Record<string, unknown>): Ui
       displayName: "Username",
       name: "trunkStaticUsername",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       required: true,
       displayOptions: { show },
     },
@@ -93,7 +95,7 @@ function buildTrunkStaticCredentialProperties(show: Record<string, unknown>): Ui
       name: "trunkStaticPassword",
       type: "string",
       typeOptions: { password: true },
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       required: true,
       displayOptions: { show },
     },
@@ -106,7 +108,10 @@ function buildTrunkOptions(
   recording: boolean,
   authMode: "static" | "digest-first" | "raw",
 ): UiProperty[] {
-  const entries: UiProperty[] = [];
+  const entries: UiProperty[] = [
+    buildSipCodecFilterOption(),
+    buildSipDtmfMethodsFilterOption(),
+  ];
   if (connectionMode === TRUNK_CONNECTION_MODE_FIXED && useRegistration) {
     entries.push({
       displayName: "Registration Expires (Seconds)",
@@ -129,7 +134,10 @@ function buildTrunkOptions(
 }
 
 function buildExtensionsOptions(authMode: "static" | "digest-first" | "raw", recording: boolean): UiProperty[] {
-  const entries: UiProperty[] = [];
+  const entries: UiProperty[] = [
+    buildSipCodecFilterOption(),
+    buildSipDtmfMethodsFilterOption(),
+  ];
   if (authMode !== "static") {
     entries.push(buildAuthTimeoutOption(OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds));
   }
@@ -168,9 +176,8 @@ export function buildTriggerNodeProperties(): UiProperty[] {
     } else {
       show.authMode = [authMode];
     }
-    return buildAddOptionsCollectionProperty(
-      "trunkOptions",
-      show,
+    return buildOptionsCollectionProperty(
+      { show },
       buildTrunkOptions(connectionMode, useRegistration, recording, authMode),
     );
   });
@@ -184,9 +191,8 @@ export function buildTriggerNodeProperties(): UiProperty[] {
     ["raw", true],
   ];
   const extensionsOptionsProperties = extensionsVariants.map(([authMode, recording]) =>
-    buildAddOptionsCollectionProperty(
-      "extensionsOptions",
-      { triggerOn: ["extensions"], authMode: [authMode], extensionsEnableCallRecording: [recording] },
+    buildOptionsCollectionProperty(
+      { show: { triggerOn: ["extensions"], authMode: [authMode], extensionsEnableCallRecording: [recording] } },
       buildExtensionsOptions(authMode, recording),
     ),
   );
@@ -198,7 +204,7 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       type: "options",
       noDataExpression: true,
       required: true,
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       options: [
         { name: "Trunk Event", value: "trunk", action: "On trunk event", description: "Receive calls and SIP requests from an external trunk" },
         { name: "Extension Event", value: "extensions", action: "On extension event", description: "Handle internal endpoint registrations and incoming calls from registered extensions" },
@@ -210,12 +216,12 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayName: "AI Tool Ref",
       name: "ref",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       required: true,
       description: REF_HINT,
       displayOptions: { show: { triggerOn: ["aiTool"] } },
     },
-    buildAddOptionsCollectionProperty("aiToolOptions", { triggerOn: ["aiTool"] }, [
+    buildOptionsCollectionProperty({ show: { triggerOn: ["aiTool"] } }, [
       {
         displayName: "Respond Timeout (Seconds)",
         name: "aiToolResponseTimeoutSeconds",
@@ -228,7 +234,7 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayName: "Trunk Ref",
       name: "ref",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       required: true,
       description: REF_HINT,
       displayOptions: { show: { triggerOn: ["trunk"] } },
@@ -249,7 +255,7 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayName: "SIP Connection",
       name: "sipPbxExternal",
       type: "credentials",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       displayOptions: { show: { triggerOn: ["trunk"], trunkConnectionMode: [TRUNK_CONNECTION_MODE_FIXED] } },
     },
     {
@@ -276,7 +282,7 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayName: "Extensions Ref",
       name: "ref",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       required: true,
       description: REF_HINT,
       displayOptions: { show: { triggerOn: ["extensions"] } },
@@ -290,11 +296,11 @@ export function buildTriggerNodeProperties(): UiProperty[] {
       displayName: "Queue Ref",
       name: "ref",
       type: "string",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       required: true,
       description: REF_HINT,
       displayOptions: { show: { triggerOn: ["queue"] } },
     },
-    { displayName: "Extensions", name: "queueExtensions", type: "string", default: "", required: true, description: "Comma-separated extension numbers for queue operators. Example: 101,102,103", displayOptions: { show: { triggerOn: ["queue"] } } },
+    { displayName: "Extensions", name: "queueExtensions", type: "string", default: OPTION_DEFAULTS.common.string, required: true, description: "Comma-separated extension numbers for queue operators. Example: 101,102,103", displayOptions: { show: { triggerOn: ["queue"] } } },
   ];
 }

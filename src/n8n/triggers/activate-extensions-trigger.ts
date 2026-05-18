@@ -9,11 +9,22 @@ import {
   requireBranchIndex,
   type ExtensionsTriggerBranch,
 } from "../../shared/branches";
-import { readCollectionOptions, readStringParameter } from "../shared/input-normalization";
+import { readOptions, readStringParameter } from "../shared/input-normalization";
 import { attachResponseHandle, buildTriggerItem, normalizePublicRawObject } from "../shared/output-builders";
 import { readSharedAuthTriggerConfig } from "./shared-auth-trigger";
+import { normalizeSipAudioCodecFilters, normalizeSipDtmfMethodFilters } from "../../shared/sip-media-filters";
 
 import { extractSipDisplayName, extractSipUser } from "../shared/sip-address";
+
+function normalizeSipAudioCodecFiltersOrDefault(value: unknown): string[] {
+  const normalized = normalizeSipAudioCodecFilters(value);
+  return normalized.length > 0 ? normalized : [...OPTION_DEFAULTS.sipMedia.codecs];
+}
+
+function normalizeSipDtmfMethodFiltersOrDefault(value: unknown): string[] {
+  const normalized = normalizeSipDtmfMethodFilters(value);
+  return normalized.length > 0 ? normalized : [...OPTION_DEFAULTS.sipMedia.dtmfMethods];
+}
 
 function readExtensionsTransportSet(options: Record<string, unknown>): string[] {
   if (!Object.prototype.hasOwnProperty.call(options, "transports")) {
@@ -30,16 +41,15 @@ function readExtensionsTransportSet(options: Record<string, unknown>): string[] 
 }
 
 export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime): Promise<any> {
-  const ref = readStringParameter(node, "ref", 0, "");
+  const ref = readStringParameter(node, "ref", 0, OPTION_DEFAULTS.common.string);
   if (!ref) {
     throw new Error("Trigger ref is required");
   }
   const authMode = readStringParameter(node, "authMode", 0, OPTION_DEFAULTS.trigger.extensions.authMode);
   const extensionsEnableCallRecording = Boolean(node.getNodeParameter?.("extensionsEnableCallRecording", 0, OPTION_DEFAULTS.trigger.extensions.enableCallRecording));
-  const options = readCollectionOptions(node, "extensionsOptions", 0);
+  const options = readOptions(node, 0);
   const authConfig = readSharedAuthTriggerConfig(node, 0, {
     kind: "extensions",
-    optionsName: "extensionsOptions",
     authModeName: "authMode",
     staticCredentialsName: "staticCredentials",
     authTimeoutDefault: OPTION_DEFAULTS.trigger.extensions.authTimeoutSeconds,
@@ -74,6 +84,8 @@ export async function activateExtensionsTrigger(node: any, runtime: PbxRuntime):
     })(),
     advertisedIp: String(options.advertisedIp || "").trim(),
     realm: String(options.realm || "").trim(),
+    codecs: normalizeSipAudioCodecFiltersOrDefault(options.codecs),
+    dtmfMethods: normalizeSipDtmfMethodFiltersOrDefault(options.dtmfMethods),
     authorizationUsernamePrefix: authConfig.authorizationUsernamePrefix,
     continueTraversalOnAuthReject: authConfig.continueTraversalOnAuthReject,
     authMode: authConfig.authMode,

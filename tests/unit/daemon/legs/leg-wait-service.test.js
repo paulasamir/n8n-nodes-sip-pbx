@@ -2,6 +2,9 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const {
+  INTERRUPT_REASON_CALL_BRIDGE_JOINED,
+} = require("../../../../build-src/shared/interrupt-reasons.js");
 
 test("LegWaitService returns event from any waited leg and includes source legId", async () => {
   const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
@@ -169,6 +172,76 @@ test("LegWaitService finalizes a shorter exact rule after interdigit timeout whe
   assert.strictEqual(result.digits, "12");
 });
 
+test("LegWaitService switches from overall timeout to interdigit timeout once digit capture is active", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { LegWaitService } = require("../../../../build-src/daemon/legs/leg-wait-service.js");
+  const { Leg } = require("../../../../build-src/daemon/legs/types.js");
+
+  const registry = new MapRegistry();
+  const service = new LegWaitService(registry);
+  const leg = Leg.create(registry, {
+    legId: "leg-overall-to-interdigit",
+    direction: "inbound",
+    transportType: "sip",
+  });
+  leg.retain("test");
+
+  const startedAt = Date.now();
+  const waitPromise = service.waitForEvent(leg.legId, {
+    timeoutMs: 40,
+    interdigitTimeoutMs: 80,
+    rules: [
+      { pattern: "12", label: "Two Digits" },
+      { pattern: "123", label: "Three Digits" },
+    ],
+  });
+
+  setTimeout(() => {
+    leg.publishEvent({ eventType: "dtmf", digits: "1", createdAt: Date.now() });
+  }, 5);
+  setTimeout(() => {
+    leg.publishEvent({ eventType: "dtmf", digits: "2", createdAt: Date.now() });
+  }, 10);
+
+  const result = await waitPromise;
+  const elapsedMs = Date.now() - startedAt;
+  assert.strictEqual(result.output, "matched");
+  assert.strictEqual(result.matchedLabel, "Two Digits");
+  assert.strictEqual(result.digits, "12");
+  assert.ok(elapsedMs >= 70, `expected interdigit wait to outlive overall timeout, got ${elapsedMs}ms`);
+});
+
+test("LegWaitService can clear queued DTMF before waiting for new digits", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { LegWaitService } = require("../../../../build-src/daemon/legs/leg-wait-service.js");
+  const { Leg } = require("../../../../build-src/daemon/legs/types.js");
+
+  const registry = new MapRegistry();
+  const service = new LegWaitService(registry);
+  const leg = Leg.create(registry, {
+    legId: "leg-clear-queued-dtmf",
+    direction: "inbound",
+    transportType: "sip",
+  });
+  leg.retain("test");
+  leg.publishEvent({ eventType: "dtmf", digits: "5", createdAt: Date.now() });
+
+  const waitPromise = service.waitForEvent(leg.legId, {
+    timeoutMs: 100,
+    clearDtmfBuffer: true,
+    rules: [{ pattern: "6", label: "Six" }],
+  });
+
+  setTimeout(() => {
+    leg.publishEvent({ eventType: "dtmf", digits: "6", createdAt: Date.now() });
+  }, 5);
+
+  const result = await waitPromise;
+  assert.strictEqual(result.output, "matched");
+  assert.strictEqual(result.matchedLabel, "Six");
+  assert.strictEqual(result.digits, "6");
+});
+
 test("LegWaitService returns terminal snapshot when a leg has already ended and been removed", async () => {
   const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
   const { LegWaitService } = require("../../../../build-src/daemon/legs/leg-wait-service.js");
@@ -196,4 +269,36 @@ test("LegWaitService returns terminal snapshot when a leg has already ended and 
   assert.strictEqual(result.eventType, "ended");
   assert.strictEqual(result.output, "ended");
   assert.strictEqual(result.reason, "test_completed");
+});
+
+test("LegWaitService consumes unselected interrupt events and continues waiting", async () => {
+  const { MapRegistry } = require("../../../../build-src/shared/map-registry.js");
+  const { LegWaitService } = require("../../../../build-src/daemon/legs/leg-wait-service.js");
+  const { Leg } = require("../../../../build-src/daemon/legs/types.js");
+
+  const registry = new MapRegistry();
+  const service = new LegWaitService(registry);
+  const leg = Leg.create(registry, {
+    legId: "leg-ignore-interrupt",
+    direction: "inbound",
+    transportType: "sip",
+  });
+  leg.retain("test");
+
+  const waitPromise = service.waitForEvent(leg.legId, {
+    timeoutMs: 100,
+    interruptReasons: [],
+  });
+
+  setTimeout(() => {
+    leg.publishEvent({ eventType: "interrupt", reason: INTERRUPT_REASON_CALL_BRIDGE_JOINED, createdAt: Date.now() });
+  }, 5);
+  setTimeout(() => {
+    leg.publishEvent({ eventType: "ended", reason: "caller_hangup", createdAt: Date.now() });
+  }, 10);
+
+  const result = await waitPromise;
+  assert.strictEqual(result.output, "ended");
+  assert.strictEqual(result.reason, "caller_hangup");
+  assert.strictEqual(leg.shiftEvent(), null);
 });

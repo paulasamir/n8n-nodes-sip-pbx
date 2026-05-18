@@ -1,4 +1,9 @@
 import { normalizeStringList } from "../../shared/string-utils";
+import {
+  CALL_INTERRUPT_REASONS,
+  type CallInterruptReason,
+} from "../../shared/interrupt-reasons";
+import type { InterruptSelection } from "../../shared/interrupt-selections";
 
 export type NodeParameterReader = {
   getNodeParameter?: (name: string, index: number, fallbackValue?: unknown) => unknown;
@@ -26,7 +31,7 @@ export type NormalizedExtensionDialConfig = {
   customSipHeaders: HeaderEntry[];
   sequentialAttemptTimeoutSeconds?: number;
   sequentialGapSeconds?: number;
-  extensionListOnlyFreeEndpoints: boolean;
+  extensionOnlyFreeEndpoints: boolean;
 };
 
 export function getInputItems(node: NodeParameterReader): any[] {
@@ -83,6 +88,37 @@ export function readStringListParameter(node: NodeParameterReader, name: string,
   return normalizeStringList(readNodeParameter(node, name, index, []));
 }
 
+export function readInterruptSelections(
+  node: NodeParameterReader,
+  name: string,
+  index: number,
+  allowedSelections: readonly InterruptSelection[],
+): InterruptSelection[] {
+  const allowed = new Set<string>(allowedSelections);
+  return readStringListParameter(node, name, index)
+    .filter((selection): selection is InterruptSelection => allowed.has(selection));
+}
+
+export function hasInterruptSelection(
+  selections: readonly InterruptSelection[],
+  selection: InterruptSelection,
+): boolean {
+  return selections.includes(selection);
+}
+
+export function readCallInterruptReasons(
+  node: NodeParameterReader,
+  name: string,
+  index: number,
+): CallInterruptReason[] {
+  const allowed = new Set<string>(CALL_INTERRUPT_REASONS);
+  const optionsValue = readOptions(node, index)[name];
+  const candidates = Array.isArray(optionsValue)
+    ? normalizeStringList(optionsValue)
+    : readStringListParameter(node, name, index);
+  return candidates.filter((reason): reason is CallInterruptReason => allowed.has(reason));
+}
+
 export function readFixedCollectionItems(node: NodeParameterReader, name: string, index: number): FixedCollectionItem[] {
   const raw = readNodeParameter(node, name, index, {});
   const container = readFixedCollectionContainer(raw);
@@ -95,13 +131,20 @@ export function readFixedCollectionItems(node: NodeParameterReader, name: string
   return [];
 }
 
-export function readOptionalScalarCollectionParameter(
+export function readOptions(node: NodeParameterReader, index: number): Record<string, unknown> {
+  const raw = readNodeParameter(node, "options", index, {});
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return {};
+  }
+  return raw as Record<string, unknown>;
+}
+
+export function readOptionalOptionsParameter(
   node: NodeParameterReader,
-  collectionName: string,
   fieldName: string,
   index: number,
 ): string {
-  const raw = readNodeParameter(node, collectionName, index, {});
+  const raw = readOptions(node, index);
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     const directValue = String((raw as Record<string, unknown>)[fieldName] || "").trim();
     if (directValue) {
@@ -109,18 +152,6 @@ export function readOptionalScalarCollectionParameter(
     }
   }
   return "";
-}
-
-export function readCollectionOptions(
-  node: NodeParameterReader,
-  collectionName: string,
-  index: number,
-): Record<string, unknown> {
-  const raw = readNodeParameter(node, collectionName, index, {});
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-    return {};
-  }
-  return raw as Record<string, unknown>;
 }
 
 export function readHeaderLinesFromCollectionOptions(
@@ -178,21 +209,21 @@ export function normalizeExtensionDialConfig(input: {
   sequentialAttemptTimeoutSeconds?: unknown;
   sequentialGapSeconds?: unknown;
   options?: Record<string, unknown>;
-  extensionListOnlyFreeEndpointsDefault?: boolean;
+  extensionOnlyFreeEndpointsDefault?: boolean;
 }): NormalizedExtensionDialConfig {
   const options = input.options || {};
   const extensionNumbers = normalizeStringList(input.extensionNumbers);
   const callStrategy = normalizeDialStrategy(input.callStrategy);
-  const extensionListOnlyFreeEndpointsDefault = input.extensionListOnlyFreeEndpointsDefault !== false;
+  const extensionOnlyFreeEndpointsDefault = input.extensionOnlyFreeEndpointsDefault !== false;
   const normalized: NormalizedExtensionDialConfig = {
     extensionNumbers,
     callStrategy,
     callerNumber: String(options.callerNumber || "").trim(),
     callerName: String(options.callerName || "").trim(),
     customSipHeaders: readHeaderLinesFromCollectionOptions(options, "customSipHeaders"),
-    extensionListOnlyFreeEndpoints: normalizeBooleanOption(
-      options.extensionListOnlyFreeEndpoints,
-      extensionListOnlyFreeEndpointsDefault,
+    extensionOnlyFreeEndpoints: normalizeBooleanOption(
+      options.extensionOnlyFreeEndpoints,
+      extensionOnlyFreeEndpointsDefault,
     ),
   };
   if (callStrategy === "sequential") {

@@ -1,4 +1,17 @@
 import * as path from "path";
+import {
+  allowsSipDtmfMethod,
+  normalizeSipAudioCodecFilters,
+  normalizeSipDtmfMethodFilters,
+  SIP_AUDIO_CODEC_ALAW,
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_G729,
+  SIP_AUDIO_CODEC_MULAW,
+  SIP_AUDIO_CODEC_OPUS,
+  SIP_DTMF_METHOD_RFC2833,
+  type SipAudioCodecFilter,
+  type SipDtmfMethodFilter,
+} from "../../../shared/sip-media-filters";
 
 export type CodecStreamContext = {
   encodeFrameInto?(input: Buffer, inputOffset: number, inputLength: number, output: Buffer, outputOffset?: number, outputLength?: number): number;
@@ -141,38 +154,34 @@ const ALAW_SEG_END = [
   0x7ff,
   0xfff,
 ];
-const MULAW_EXP_LUT = [
-  0, 1, 2, 2, 3, 3, 3, 3,
-  4, 4, 4, 4, 4, 4, 4, 4,
-  5, 5, 5, 5, 5, 5, 5, 5,
-  5, 5, 5, 5, 5, 5, 5, 5,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  6, 6, 6, 6, 6, 6, 6, 6,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-  7, 7, 7, 7, 7, 7, 7, 7,
-];
+
+function searchSegment(value: number, table: readonly number[]): number {
+  for (let index = 0; index < table.length; index += 1) {
+    if (value <= table[index]) {
+      return index;
+    }
+  }
+  return table.length;
+}
 
 function linearToMulawSample(sample: number): number {
   let pcm = clampPcm16(sample);
-  const sign = (pcm >> 8) & 0x80;
-  if (sign) {
-    pcm = -pcm;
+  let mask = 0xff;
+  if (pcm < 0) {
+    pcm = MULAW_BIAS - pcm;
+    mask = 0x7f;
+  } else {
+    pcm = MULAW_BIAS + pcm;
   }
   if (pcm > MULAW_CLIP) {
     pcm = MULAW_CLIP;
   }
-  pcm += MULAW_BIAS;
-  const exponent = MULAW_EXP_LUT[(pcm >> 7) & 0xff];
+  let exponent = 0;
+  for (let value = pcm >> 7; value > 1; value >>= 1) {
+    exponent += 1;
+  }
   const mantissa = (pcm >> (exponent + 3)) & 0x0f;
-  return (~(sign | (exponent << 4) | mantissa)) & 0xff;
+  return ((exponent << 4) | mantissa) ^ mask;
 }
 
 function mulawToLinearSample(value: number): number {
@@ -186,25 +195,22 @@ function mulawToLinearSample(value: number): number {
 }
 
 function linearToAlawSample(sample: number): number {
-  let pcm = clampPcm16(sample);
+  let pcm = clampPcm16(sample) >> 3;
   let mask = 0xd5;
   if (pcm < 0) {
     mask = 0x55;
-    pcm = -pcm - 8;
+    pcm = -pcm - 1;
     if (pcm < 0) {
       pcm = 0;
     }
   }
-  let exponent = 0;
-  while (exponent < ALAW_SEG_END.length && pcm > ALAW_SEG_END[exponent]) {
-    exponent += 1;
-  }
+  const exponent = searchSegment(pcm, ALAW_SEG_END);
   if (exponent >= ALAW_SEG_END.length) {
     return (0x7f ^ mask) & 0xff;
   }
   const mantissa = exponent === 0
-    ? ((pcm >> 4) & 0x0f)
-    : ((pcm >> (exponent + 3)) & 0x0f);
+    ? ((pcm >> 1) & 0x0f)
+    : ((pcm >> exponent) & 0x0f);
   return (((exponent << 4) | mantissa) ^ mask) & 0xff;
 }
 
@@ -780,19 +786,9 @@ export function hasNativeOpusCodecSupport(): boolean {
   return hasCodecPair(loadNativeCodecBindings(), "OpusEncoder", "OpusDecoder");
 }
 
-export function normalizeCodecKey(value?: string | null): string {
-  const normalized = String(value || "").trim().toLowerCase();
-  if (normalized === "mulaw" || normalized === "mu-law" || normalized === "g711u") {
-    return "pcmu";
-  }
-  if (normalized === "alaw" || normalized === "a-law" || normalized === "g711a") {
-    return "pcma";
-  }
-  return normalized;
-}
-
 export function codecOrderIndex(name?: string | null): number {
-  const index = PREFERRED_AUDIO_CODEC_ORDER.indexOf(normalizeCodecKey(name) as (typeof PREFERRED_AUDIO_CODEC_ORDER)[number]);
+  const normalized = String(name || "").trim().toLowerCase();
+  const index = PREFERRED_AUDIO_CODEC_ORDER.indexOf(normalized as (typeof PREFERRED_AUDIO_CODEC_ORDER)[number]);
   return index >= 0 ? index : Number.MAX_SAFE_INTEGER;
 }
 
@@ -827,7 +823,7 @@ export function createCodec(codecName: AudioCodecName = "g711"): AudioCodec {
 }
 
 export function mapDescriptorNameToAudioCodecName(descriptorName: string | null | undefined): AudioCodecName {
-  const normalized = normalizeCodecKey(descriptorName || "");
+  const normalized = String(descriptorName || "").trim().toLowerCase();
   if (normalized === "g722") {
     return "g722";
   }
@@ -844,15 +840,15 @@ export function getCodecDescriptorsForAudioCodec(codecName: AudioCodecName): Aud
   const descriptors = getImplementedCodecDescriptors("audio") as AudioCodecDescriptor[];
   switch (codecName) {
     case "g722":
-      return descriptors.filter((descriptor) => normalizeCodecKey(descriptor.name) === "g722");
+      return descriptors.filter((descriptor) => String(descriptor.name || "").trim().toLowerCase() === "g722");
     case "g729":
-      return descriptors.filter((descriptor) => normalizeCodecKey(descriptor.name) === "g729");
+      return descriptors.filter((descriptor) => String(descriptor.name || "").trim().toLowerCase() === "g729");
     case "opus":
-      return descriptors.filter((descriptor) => normalizeCodecKey(descriptor.name) === "opus");
+      return descriptors.filter((descriptor) => String(descriptor.name || "").trim().toLowerCase() === "opus");
     case "g711":
     default:
       return descriptors.filter((descriptor) => {
-        const key = normalizeCodecKey(descriptor.name);
+        const key = String(descriptor.name || "").trim().toLowerCase();
         return key === "pcma" || key === "pcmu";
       });
   }
@@ -938,7 +934,28 @@ function resolveOpusChannels(descriptorChannels: number, explicit?: NegotiatedPa
 }
 
 function getDescriptorByNormalizedKey(key: string, descriptors: CodecDescriptor[]): CodecDescriptor | null {
-  return descriptors.find((descriptor) => normalizeCodecKey(descriptor.name) === key) || null;
+  return descriptors.find((descriptor) => String(descriptor.name || "").trim().toLowerCase() === key) || null;
+}
+
+function isCodecDescriptorAllowed(
+  descriptor: CodecDescriptor,
+  allowedAudioCodecs: readonly SipAudioCodecFilter[],
+  allowedDtmfMethods: readonly SipDtmfMethodFilter[],
+): boolean {
+  if (descriptor.kind === "dtmf") {
+    return allowsSipDtmfMethod(allowedDtmfMethods, SIP_DTMF_METHOD_RFC2833);
+  }
+  if (!allowedAudioCodecs.length) {
+    return true;
+  }
+  const codecName = String(descriptor.name || "").trim().toLowerCase();
+  return (
+    (codecName === "pcma" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_ALAW))
+    || (codecName === "pcmu" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_MULAW))
+    || (codecName === "g722" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_G722))
+    || (codecName === "g729" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_G729))
+    || (codecName === "opus" && allowedAudioCodecs.includes(SIP_AUDIO_CODEC_OPUS))
+  );
 }
 
 export function resolveCodecForPayloadType(
@@ -952,7 +969,7 @@ export function resolveCodecForPayloadType(
   }
   const normalizedPayloadCodecs = normalizePayloadCodecs(payloadCodecs);
   const negotiated = normalizedPayloadCodecs[normalizedPayloadType];
-  const explicitCodecKey = normalizeCodecKey(String(negotiated?.codec || ""));
+  const explicitCodecKey = String(negotiated?.codec || "").trim().toLowerCase();
   if (explicitCodecKey) {
     const descriptor = getDescriptorByNormalizedKey(explicitCodecKey, descriptors);
     if (!descriptor) {
@@ -1014,7 +1031,7 @@ export function pickPreferredAudioPayloadType(
 
 export function buildCodecRtpMap(codec: CodecDescriptor): string {
   const codecToken = String(codec.rtpmap || codec.name || "").split("/")[0] || String(codec.name || "");
-  const channelSuffix = normalizeCodecKey(codec.name) === "opus"
+  const channelSuffix = String(codec.name || "").trim().toLowerCase() === "opus"
     ? "/2"
     : (Number(codec.channels || 1) > 1 ? `/${Number(codec.channels)}` : "");
   return `a=rtpmap:${codec.payloadType} ${codecToken}/${Number(codec.clockRate)}${channelSuffix}`;
@@ -1032,6 +1049,8 @@ function sortLocalCodecDescriptors(descriptors: CodecDescriptor[]): CodecDescrip
 function buildNegotiatedCodecDescriptors(
   remotePayloadTypes: number[] = [],
   remotePayloadCodecs: Record<number, NegotiatedPayloadCodec> = {},
+  allowedAudioCodecs: readonly SipAudioCodecFilter[] = [],
+  allowedDtmfMethods: readonly SipDtmfMethodFilter[] = [],
 ): CodecDescriptor[] {
   const payloadTypes = Array.isArray(remotePayloadTypes)
     ? remotePayloadTypes.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
@@ -1046,7 +1065,7 @@ function buildNegotiatedCodecDescriptors(
       continue;
     }
     const descriptor = resolveCodecForPayloadType(payloadType, remotePayloadCodecs);
-    if (!descriptor || !descriptor.implemented) {
+    if (!descriptor || !descriptor.implemented || !isCodecDescriptorAllowed(descriptor, allowedAudioCodecs, allowedDtmfMethods)) {
       continue;
     }
     descriptors.push(descriptor);
@@ -1066,17 +1085,27 @@ export function buildLocalAudioSdpDescription(
   rtpPort: number,
   remotePayloadTypes: number[] = [],
   remotePayloadCodecs: Record<number, NegotiatedPayloadCodec> = {},
+  allowedAudioCodecs: readonly SipAudioCodecFilter[] | unknown = [],
+  allowedDtmfMethods: readonly SipDtmfMethodFilter[] | unknown = [],
 ): LocalAudioSdpDescription | null {
+  const normalizedAllowedAudioCodecs = normalizeSipAudioCodecFilters(allowedAudioCodecs);
+  const normalizedAllowedDtmfMethods = normalizeSipDtmfMethodFilters(allowedDtmfMethods);
   const remotePayloadTypeList = Array.isArray(remotePayloadTypes)
     ? remotePayloadTypes.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value >= 0)
     : [];
-  const negotiatedDescriptors = buildNegotiatedCodecDescriptors(remotePayloadTypeList, remotePayloadCodecs);
+  const negotiatedDescriptors = buildNegotiatedCodecDescriptors(
+    remotePayloadTypeList,
+    remotePayloadCodecs,
+    normalizedAllowedAudioCodecs,
+    normalizedAllowedDtmfMethods,
+  );
   if (remotePayloadTypeList.length && !negotiatedDescriptors.length) {
     return null;
   }
   const activeDescriptors = negotiatedDescriptors.length
     ? negotiatedDescriptors
-    : sortLocalCodecDescriptors(getImplementedCodecDescriptors());
+    : sortLocalCodecDescriptors(getImplementedCodecDescriptors())
+      .filter((descriptor) => isCodecDescriptorAllowed(descriptor, normalizedAllowedAudioCodecs, normalizedAllowedDtmfMethods));
   const audioDescriptors = activeDescriptors.filter((descriptor) => descriptor.kind === "audio");
   if (!audioDescriptors.length) {
     return null;
@@ -1106,7 +1135,12 @@ export function pickNegotiatedDtmfPayloadType(
   remotePayloadTypes: number[] = [],
   remotePayloadCodecs: Record<number, NegotiatedPayloadCodec> = {},
   preferredClockRate?: number | null,
+  allowedDtmfMethods: readonly SipDtmfMethodFilter[] | unknown = [],
 ): number | null {
+  const normalizedAllowedDtmfMethods = normalizeSipDtmfMethodFilters(allowedDtmfMethods);
+  if (!allowsSipDtmfMethod(normalizedAllowedDtmfMethods, SIP_DTMF_METHOD_RFC2833)) {
+    return null;
+  }
   const negotiatedDtmf = buildNegotiatedCodecDescriptors(remotePayloadTypes, remotePayloadCodecs)
     .filter((descriptor) => descriptor.kind === "dtmf");
   if (!negotiatedDtmf.length) {
@@ -1127,13 +1161,15 @@ export function buildSelectedLocalAudioSdpDescription(
   audioPayloadType: number,
   dtmfPayloadType: number | null,
   payloadCodecs: Record<number, NegotiatedPayloadCodec> = {},
+  allowedDtmfMethods: readonly SipDtmfMethodFilter[] | unknown = [],
 ): LocalAudioSdpDescription | null {
+  const normalizedAllowedDtmfMethods = normalizeSipDtmfMethodFilters(allowedDtmfMethods);
   const audioDescriptor = resolveAudioCodecForPayloadType(audioPayloadType, payloadCodecs);
   if (!audioDescriptor) {
     return null;
   }
   const descriptors: CodecDescriptor[] = [audioDescriptor];
-  if (dtmfPayloadType != null) {
+  if (dtmfPayloadType != null && allowsSipDtmfMethod(normalizedAllowedDtmfMethods, SIP_DTMF_METHOD_RFC2833)) {
     const dtmfDescriptor = resolveCodecForPayloadType(dtmfPayloadType, payloadCodecs);
     if (dtmfDescriptor && dtmfDescriptor.kind === "dtmf" && dtmfDescriptor.implemented) {
       descriptors.push(dtmfDescriptor);

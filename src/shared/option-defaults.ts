@@ -1,3 +1,13 @@
+import {
+  SIP_AUDIO_CODEC_ALAW,
+  SIP_AUDIO_CODEC_G722,
+  SIP_AUDIO_CODEC_G729,
+  SIP_AUDIO_CODEC_MULAW,
+  SIP_AUDIO_CODEC_OPUS,
+  SIP_DTMF_METHOD_INFO,
+  SIP_DTMF_METHOD_RFC2833,
+} from "./sip-media-filters";
+
 const TRIGGER_RESPOND_TIMEOUT_SECONDS = 5;
 const DIAL_WAIT_TIMEOUT_SECONDS = 30;
 const TRIGGER_RESPONSE_TIMEOUT_DEFAULT = {
@@ -14,15 +24,34 @@ const TRIGGER_QUEUE_RESPONSE_TIMEOUT_DEFAULT = {
 } as const;
 
 export const OPTION_DEFAULTS = {
+  common: {
+    string: "",
+    object: {} as Record<string, never>,
+    array: [] as string[],
+  },
   sip: {
     transport: "udp",
     bindIp: "0.0.0.0",
+    localBindPort: 0,
     port: 5060,
     tlsPort: 5061,
-    stunPort: 3478,
     registrationExpiresSeconds: 600,
   },
-  autoRecording: {
+  sipMedia: {
+    codecs: [
+      SIP_AUDIO_CODEC_OPUS,
+      SIP_AUDIO_CODEC_G722,
+      SIP_AUDIO_CODEC_ALAW,
+      SIP_AUDIO_CODEC_MULAW,
+      SIP_AUDIO_CODEC_G729,
+    ] as string[],
+    dtmfMethods: [
+      SIP_DTMF_METHOD_RFC2833,
+      SIP_DTMF_METHOD_INFO,
+    ] as string[],
+  },
+  globalRecording: {
+    active: true,
     fileFormat: "wav",
     wavSampleRate: 8000,
     wavBitDepth: 16,
@@ -44,6 +73,7 @@ export const OPTION_DEFAULTS = {
     silenceDurationMs: 300,
     httpMethod: "PUT",
     httpAuthentication: "none",
+    httpCredentialSelection: null as null,
   },
   trigger: {
     trunk: {
@@ -79,14 +109,18 @@ export const OPTION_DEFAULTS = {
   },
   call: {
     relayDtmf: "auto",
+    emitDtmfEvents: true,
     recordingControlAction: "pause",
     waitTimeoutSeconds: 30,
     interdigitTimeoutSeconds: 1,
+    interruptReasons: [] as string[],
+    clearDtmfBuffer: false,
     waitDtmfFallbackEnabled: false,
+    waitDtmfMultiDigitFallbackEnabled: false,
     dtmfTerminatorDigit: "#",
   },
   dial: {
-    extensionListOnlyFreeEndpoints: true,
+    extensionOnlyFreeEndpoints: true,
     strategy: "parallel",
     websocketStartMode: "immediate",
     sequentialAttemptTimeoutSeconds: 30,
@@ -97,11 +131,19 @@ export const OPTION_DEFAULTS = {
     openaiRealtimeModel: "gpt-realtime",
     openaiRealtimeVoice: "marin",
     openaiRealtimeInputTranscriptionModel: "gpt-4o-transcribe",
+    openaiRealtimeInstructions: "",
+    openaiRealtimePromptId: "",
+    openaiRealtimePromptVersion: "",
+    openaiRealtimePromptVariablesJson: "{}",
     openaiRealtimeInputSampleRate: 24000,
     openaiRealtimeOutputSampleRate: 24000,
     geminiLiveModel: "gemini-3.1-flash-live-preview",
     geminiLiveVoice: "Puck",
     geminiLiveApiVersion: "v1beta",
+    geminiLiveInstructions: "",
+    websocketUrl: "",
+    websocketHeadersJson: "{}",
+    websocketInitialMessagesJson: "[]",
     geminiLiveInputSampleRate: 16000,
     geminiLiveOutputSampleRate: 24000,
     websocketAudioInputEventType: "input_audio",
@@ -115,12 +157,14 @@ export const OPTION_DEFAULTS = {
     binaryProperty: "data",
     httpMethod: "GET",
     httpAuthentication: "none",
+    httpCredentialSelection: null as null,
     voiceThreshold: 0.02,
     voiceDurationMs: 150,
     duckingFactor: 1,
   },
   playTone: {
     tone: "ringback",
+    repeatInfinite: false,
     presets: [
       {
         value: "ringback",
@@ -147,10 +191,10 @@ export const OPTION_DEFAULTS = {
   },
   mediaExecution: {
     mode: "blocking",
+    stopOtherMedia: false,
   },
   stopMedia: {
     target: "mediaId",
-    reason: "stop_media",
   },
   waitMedia: {
     timeoutSeconds: 30,
@@ -165,13 +209,15 @@ export const OPTION_DEFAULTS = {
     statusCode: 401,
   },
   queueAction: {
+    callbackEnabled: true,
     placement: "back",
+    rejoinExisting: true,
     statsTarget: "ref",
   },
   aiTool: {
     parameterType: "string",
+    parameterRequired: false,
   },
 } as const;
 
 export type PlayTonePreset = (typeof OPTION_DEFAULTS.playTone.presets)[number];
-export type PlayTonePresetValue = PlayTonePreset["value"];

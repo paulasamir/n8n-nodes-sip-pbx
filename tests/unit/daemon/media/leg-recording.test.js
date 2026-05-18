@@ -89,6 +89,49 @@ test("Leg bridge playback is ducked by higher-priority local playback", async ()
   }
 });
 
+test("Leg.configureTransport forwards inbound allowed codec and DTMF filters into RTP negotiation", async () => {
+  const { Leg } = require("../../../../build-src/daemon/media/worker/entities/leg.js");
+  const { RtpTransport } = require("../../../../build-src/daemon/media/transports/rtp-transport.js");
+  const {
+    SIP_AUDIO_CODEC_ALAW,
+    SIP_DTMF_METHOD_INFO,
+  } = require("../../../../build-src/shared/sip-media-filters.js");
+
+  const transport = new RtpTransport({
+    sendPacket() {
+      return false;
+    },
+  });
+  const leg = new Leg({
+    legId: "leg-inbound-filtered-negotiation",
+    transportType: "sip",
+    transport,
+  });
+
+  try {
+    const details = await leg.configureTransport({
+      payloadTypes: [9, 8, 97],
+      payloadCodecs: {
+        8: { codec: "pcma", clockRate: 8000, channels: 1 },
+        9: { codec: "g722", clockRate: 8000, channels: 1 },
+        97: { codec: "telephone-event", clockRate: 8000, channels: 1, fmtp: "0-16" },
+      },
+      allowedAudioCodecs: [SIP_AUDIO_CODEC_ALAW],
+      allowedDtmfMethods: [SIP_DTMF_METHOD_INFO],
+    });
+
+    assert.strictEqual(details.audioPayloadType, 8);
+    assert.strictEqual(details.audioCodecName, "pcma");
+    assert.strictEqual(details.dtmfPayloadType, null);
+    assert.deepStrictEqual(details.payloadTypes, [8]);
+    assert.ok(details.localSdpAudioLines.some((line) => String(line).includes("PCMA/8000")));
+    assert.ok(!details.localSdpAudioLines.some((line) => String(line).includes("G722/8000")));
+    assert.ok(!details.localSdpAudioLines.some((line) => String(line).includes("telephone-event")));
+  } finally {
+    leg.close();
+  }
+});
+
 test("Leg.startRecording prepends inbound pre-roll without duplicating pending frames", async () => {
   const { Leg } = require("../../../../build-src/daemon/media/worker/entities/leg.js");
 
@@ -173,7 +216,7 @@ test("Leg recording emits silence interrupt from inbound PCM levels", async () =
     assert.strictEqual(interrupts.length, 1);
     assert.strictEqual(interrupts[0].legId, "leg-recording-silence");
     assert.strictEqual(interrupts[0].mediaId, "media-silence");
-    assert.strictEqual(interrupts[0].reason, "silence");
+    assert.strictEqual(interrupts[0].reason, "media_silence");
     assert.ok(Number(interrupts[0].details.silenceDurationMs || 0) >= 40);
   } finally {
     leg.close();
@@ -206,7 +249,7 @@ test("Leg recording emits silence interrupt when inbound PCM stops completely", 
     assert.strictEqual(interrupts.length, 1);
     assert.strictEqual(interrupts[0].legId, "leg-recording-silence-timeout");
     assert.strictEqual(interrupts[0].mediaId, "media-silence-timeout");
-    assert.strictEqual(interrupts[0].reason, "silence");
+    assert.strictEqual(interrupts[0].reason, "media_silence");
     assert.ok(Number(interrupts[0].details.silenceDurationMs || 0) >= 40);
     assert.strictEqual(Number(interrupts[0].details.silenceLevel || 0), 0);
   } finally {

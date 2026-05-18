@@ -1,7 +1,7 @@
 import { OPTION_DEFAULTS } from "../../shared/option-defaults";
-import { readCollectionOptions } from "../shared/input-normalization";
+import { readOptions } from "../shared/input-normalization";
 import { readCredentialsParameter } from "../shared/credential-loading";
-import { buildAddOptionsCollectionProperty, type UiProperty } from "../ui/description-fragments";
+import { buildOptionsCollectionProperty, type UiProperty } from "../ui/description-fragments";
 import type { WebSocketDialProfileDescriptor } from "./index";
 
 function extendShow(show: Record<string, unknown>): Record<string, unknown> {
@@ -23,7 +23,7 @@ function buildGeminiLivePrimaryProperties(_show: Record<string, unknown>): UiPro
       displayName: "Gemini API",
       name: "googlePalmApi",
       type: "credentials",
-      default: "",
+      default: OPTION_DEFAULTS.common.string,
       displayOptions: { show: profileShow },
     },
   ];
@@ -32,7 +32,7 @@ function buildGeminiLivePrimaryProperties(_show: Record<string, unknown>): UiPro
 function buildGeminiLiveOptionCollections(_show: Record<string, unknown>): UiProperty[] {
   const profileShow = extendShow(_show);
   return [
-    buildAddOptionsCollectionProperty("dialOptions", profileShow, [
+    buildOptionsCollectionProperty({ show: profileShow }, [
       {
         displayName: "Gemini Live Model",
         name: "geminiLiveModel",
@@ -42,7 +42,7 @@ function buildGeminiLiveOptionCollections(_show: Record<string, unknown>): UiPro
       },
       { displayName: "Gemini Live Voice", name: "geminiLiveVoice", type: "string", default: OPTION_DEFAULTS.dial.geminiLiveVoice },
       { displayName: "Gemini Live API Version", name: "geminiLiveApiVersion", type: "string", default: OPTION_DEFAULTS.dial.geminiLiveApiVersion },
-      { displayName: "Gemini Live Instructions", name: "geminiLiveInstructions", type: "string", typeOptions: { rows: 4 }, default: "" },
+      { displayName: "Gemini Live Instructions", name: "geminiLiveInstructions", type: "string", typeOptions: { rows: 4 }, default: OPTION_DEFAULTS.dial.geminiLiveInstructions },
     ]),
   ];
 }
@@ -68,7 +68,7 @@ export const geminiLiveWebSocketDialProfile: WebSocketDialProfileDescriptor = {
   async applyInput({ input, index, node }) {
     const credentials = await readCredentialsParameter(node, "googlePalmApi", index);
     input.geminiApiKey = String(credentials?.apiKey || "").trim();
-    const options = readCollectionOptions(node, "dialOptions", index);
+    const options = readOptions(node, index);
     for (const fieldName of [
       "geminiLiveModel",
       "geminiLiveVoice",

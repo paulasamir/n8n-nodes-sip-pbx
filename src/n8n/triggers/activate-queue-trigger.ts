@@ -8,15 +8,16 @@ import {
   requireBranchIndex,
   type QueueTriggerBranch,
 } from "../../shared/branches";
+import { OPTION_DEFAULTS } from "../../shared/option-defaults";
 import { readStringParameter } from "../shared/input-normalization";
 import { buildTriggerItem } from "../shared/output-builders";
 
 export async function activateQueueTrigger(node: any, runtime: PbxRuntime): Promise<any> {
-  const ref = readStringParameter(node, "ref", 0, "");
+  const ref = readStringParameter(node, "ref", 0, OPTION_DEFAULTS.common.string);
   if (!ref) {
     throw new Error("Trigger ref is required");
   }
-  const queueExtensions = readStringParameter(node, "queueExtensions", 0, "")
+  const queueExtensions = readStringParameter(node, "queueExtensions", 0, OPTION_DEFAULTS.common.string)
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
