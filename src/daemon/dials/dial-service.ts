@@ -23,6 +23,7 @@ export class DialService {
   private readonly legService: LegService;
   private readonly legCoordinator: LegCoordinator;
   private readonly terminalSnapshots: TerminalSnapshotStore<DialEvent & { dialId: string }>;
+  private readonly winnerLegRetentions = new Map<string, RetentionTicket>();
   private onAttemptStarted: (dial: Dial, legId: string, target: DialTarget) => void;
   private onAttemptAnswered: (dial: Dial, legId: string) => void;
   private onDialFinalized: (dial: Dial, status: Dial["status"], reason?: string) => void;
@@ -132,22 +133,47 @@ export class DialService {
   markAttemptAnswered(dialId: string, legId: string): void {
     const dial = this.requireDial(dialId);
     if (dial.finalizedAt) return;
+
     dial.clearAttemptTimeout(legId);
     dial.winnerLegId = legId;
     dial.status = "answered";
+
+    // Transfer ownership of the answered leg from the dial attempt
+    // to the live call lifecycle.
+    if (!this.winnerLegRetentions.has(legId)) {
+      this.winnerLegRetentions.set(
+        legId,
+        this.legService.retainLeg(legId, `dial-winner:${dialId}`),
+      );
+    }
+
     this.onAttemptAnswered(dial, legId);
-    dial.publishEvent({ eventType: DIAL_EVENT_ANSWERED, legId, createdAt: nowMs() });
+    dial.publishEvent({
+      eventType: DIAL_EVENT_ANSWERED,
+      legId,
+      createdAt: nowMs(),
+    });
+
     for (const attemptLegId of dial.attemptLegIds) {
       if (attemptLegId === legId) continue;
+
       if (dial.releaseAttemptOwnership(attemptLegId)) {
         dial.releaseAttemptRetention(attemptLegId);
       }
+
       this.legService.hangupLeg(attemptLegId, "parallel_loser");
     }
+
     this.finalizeDial(dialId, "answered");
   }
 
   handleAttemptLegEnded(legId: string): void {
+    const winnerRetention = this.winnerLegRetentions.get(legId);
+
+    if (winnerRetention) {
+      this.winnerLegRetentions.delete(legId);
+      winnerRetention.release();
+    }
     for (const dial of this.registry.values()) {
       if (!dial.hasActiveAttempt(legId)) {
         continue;
